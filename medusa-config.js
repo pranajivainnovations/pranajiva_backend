@@ -17,16 +17,18 @@ switch (process.env.NODE_ENV) {
     break;
 }
 
+ENV_FILE_NAME = ".env";
+
 try {
   dotenv.config({ path: process.cwd() + "/" + ENV_FILE_NAME });
 } catch (e) {}
 
 // CORS when consuming Medusa from admin
 const ADMIN_CORS =
-  process.env.ADMIN_CORS || "http://localhost:7000,http://localhost:7001";
+  process.env.ADMIN_CORS || "http://localhost:7001,http://localhost:7001";
 
 // CORS to avoid issues when consuming Medusa from a client
-const STORE_CORS = process.env.STORE_CORS || "http://localhost:8000";
+const STORE_CORS = process.env.STORE_CORS || "http://localhost:3000";
 
 const DATABASE_URL =
   process.env.DATABASE_URL || "postgres://localhost/medusa-starter-default";
@@ -50,6 +52,7 @@ const plugins = [
       develop: {
         open: process.env.OPEN_BROWSER !== "false",
       },
+      backend: process.env.MEDUSA_BACKEND_URL || "http://localhost:9001"
     },
   },
 ];
@@ -76,7 +79,12 @@ const projectConfig = {
   store_cors: STORE_CORS,
   database_url: DATABASE_URL,
   admin_cors: ADMIN_CORS,
-  redis_url: REDIS_URL
+  redis_url: REDIS_URL,
+  port: process.env.PORT || 9001,
+};
+
+const featureFlags = {
+  product_categories: true,
 };
 
 const serverConfig = {
@@ -89,5 +97,6 @@ module.exports = {
   projectConfig,
   plugins,
   modules,
+  featureFlags,
   serverConfig,
 };
