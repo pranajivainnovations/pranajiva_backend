@@ -38,12 +38,27 @@ const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const plugins = [
   `medusa-fulfillment-manual`,
   `medusa-payment-manual`,
+  // S3 File Provider for product image uploads
+  {
+    resolve: `medusa-file-s3`,
+    options: {
+      s3_url: process.env.S3_URL || "https://s3.amazonaws.com",
+      bucket: process.env.S3_BUCKET || "",
+      region: process.env.S3_REGION || "us-east-1",
+      access_key_id: process.env.S3_ACCESS_KEY_ID || "",
+      secret_access_key: process.env.S3_SECRET_ACCESS_KEY || "",
+      cache_control: "max-age=3600", // Cache for 1 hour
+    },
+  },
+  // File Local Disabled - using S3 instead
+  /*
   {
     resolve: `@medusajs/file-local`,
     options: {
       upload_dir: "uploads",
     },
   },
+  */
   {
     resolve: "@medusajs/admin",
     /** @type {import('@medusajs/admin').PluginOptions} */
