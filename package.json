@@ -26,6 +26,7 @@
     "dev": "cross-env npm run build:server && medusa develop"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1081.0",
     "@medusajs/admin": "^7.1.16",
     "@medusajs/cache-inmemory": "1.8.11",
     "@medusajs/cache-redis": "^1.9.2",
@@ -45,7 +46,8 @@
     "medusa-payment-stripe": "6.0.11",
     "pg": "^8.20.0",
     "prism-react-renderer": "^2.0.4",
-    "typeorm": "0.3.16"
+    "typeorm": "0.3.16",
+    "uuid": "^14.0.1"
   },
   "devDependencies": {
     "@babel/cli": "^7.14.3",
