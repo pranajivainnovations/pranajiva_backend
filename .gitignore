@@ -17,6 +17,7 @@ yarn.lock
 medusa-db.sql
 build
 .cache
+pranajivainnovationpem.pem
 
 .yarn/*
 !.yarn/patches

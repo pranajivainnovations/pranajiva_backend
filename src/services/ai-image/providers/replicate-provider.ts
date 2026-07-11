@@ -5,9 +5,12 @@
  * Supports any model hosted on Replicate (FLUX.1, SDXL, etc.)
  *
  * Flow:
- *   1. POST to create a prediction
- *   2. Poll until prediction completes (or use webhook in future)
+ *   1. POST to create a prediction (one at a time, sequentially)
+ *   2. Poll until prediction completes (or use "Prefer: wait")
  *   3. Return image URLs
+ *
+ * IMPORTANT: Predictions run sequentially with a delay between them
+ * to avoid Replicate's rate limit (especially on low-credit accounts).
  */
 
 import { ImageProvider, GenerateOptions, GeneratedImage } from "../types"
@@ -15,6 +18,7 @@ import { ImageProvider, GenerateOptions, GeneratedImage } from "../types"
 const REPLICATE_API_BASE = "https://api.replicate.com/v1"
 const POLL_INTERVAL_MS = 2000
 const MAX_POLL_ATTEMPTS = 60 // 60 * 2s = 120s max wait
+const DELAY_BETWEEN_PREDICTIONS_MS = 12000 // 12s gap between predictions
 
 interface ReplicatePrediction {
   id: string
@@ -39,38 +43,45 @@ export class ReplicateProvider implements ImageProvider {
 
   async generate(prompt: string, options: GenerateOptions): Promise<GeneratedImage[]> {
     const images: GeneratedImage[] = []
+    const imageCount = options.imageCount || 1
 
-    // FLUX models generate one image per prediction
-    // So we run multiple predictions in parallel for imageCount > 1
-    const predictions = await Promise.all(
-      Array.from({ length: options.imageCount }, (_, i) =>
-        this.createAndWaitPrediction(prompt, options, i)
-      )
-    )
-
-    for (const prediction of predictions) {
-      if (prediction.status === "failed") {
-        console.error(`[Replicate] Prediction failed:`, prediction.error)
-        continue
+    // Run predictions SEQUENTIALLY with delay to avoid rate limits
+    for (let i = 0; i < imageCount; i++) {
+      // Wait between predictions (not before the first one)
+      if (i > 0) {
+        console.log(`[Replicate] Waiting ${DELAY_BETWEEN_PREDICTIONS_MS / 1000}s before prediction ${i + 1}...`)
+        await this.sleep(DELAY_BETWEEN_PREDICTIONS_MS)
       }
 
-      if (prediction.output) {
-        const urls = Array.isArray(prediction.output)
-          ? prediction.output
-          : [prediction.output]
+      try {
+        const prediction = await this.createAndWaitPrediction(prompt, options, i)
 
-        for (const url of urls) {
-          if (typeof url === "string" && url.startsWith("http")) {
-            images.push({ url, index: images.length })
+        if (prediction.status === "failed") {
+          console.error(`[Replicate] Prediction ${i + 1} failed:`, prediction.error)
+          continue
+        }
+
+        if (prediction.output) {
+          const urls = Array.isArray(prediction.output)
+            ? prediction.output
+            : [prediction.output]
+
+          for (const url of urls) {
+            if (typeof url === "string" && url.startsWith("http")) {
+              images.push({ url, index: images.length })
+            }
           }
         }
+      } catch (err) {
+        console.error(`[Replicate] Prediction ${i + 1} error:`, err)
+        // If first prediction fails, throw immediately
+        if (i === 0) throw err
+        // Otherwise continue with what we have
       }
     }
 
     if (images.length === 0) {
-      throw new Error(
-        `[Replicate] All predictions failed. Last error: ${predictions[predictions.length - 1]?.error || "unknown"}`
-      )
+      throw new Error(`[Replicate] All ${imageCount} predictions failed`)
     }
 
     return images
@@ -84,6 +95,12 @@ export class ReplicateProvider implements ImageProvider {
     index: number
   ): Promise<ReplicatePrediction> {
     const prediction = await this.createPrediction(prompt, options, index)
+
+    // If "Prefer: wait" already resolved it, return immediately
+    if (prediction.status === "succeeded" || prediction.status === "failed") {
+      return prediction
+    }
+
     return this.pollPrediction(prediction.urls.get)
   }
 
@@ -111,14 +128,7 @@ export class ReplicateProvider implements ImageProvider {
       )
     }
 
-    const prediction: ReplicatePrediction = await response.json()
-
-    // If "Prefer: wait" worked, prediction might already be complete
-    if (prediction.status === "succeeded" || prediction.status === "failed") {
-      return prediction
-    }
-
-    return prediction
+    return await response.json()
   }
 
   private async pollPrediction(getUrl: string): Promise<ReplicatePrediction> {
@@ -141,7 +151,6 @@ export class ReplicateProvider implements ImageProvider {
         return prediction
       }
 
-      // Still processing — wait and retry
       await this.sleep(POLL_INTERVAL_MS)
       attempts++
     }
@@ -160,7 +169,6 @@ export class ReplicateProvider implements ImageProvider {
         aspect_ratio: options.aspectRatio || "1:1",
         output_format: "png",
         output_quality: options.quality === "high" ? 90 : 75,
-        // Add slight seed variation per image in batch for diversity
         ...(index > 0 ? { seed: Math.floor(Math.random() * 2147483647) } : {}),
       }
     }
