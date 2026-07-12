@@ -69,6 +69,10 @@ export interface GenerationRequest {
   style: string
   occasion: string
   flavor: string
+  weight?: string
+  tiers?: string
+  color?: string
+  cakeMessage?: string
   zodiacInfluence?: {
     sign: string
     suggestion: string

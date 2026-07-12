@@ -51,11 +51,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     }
 
     // ── 2. Validate request body ───────────────────────────────────────────────
-    const { prompt, style, occasion, flavor, zodiacInfluence, imageCount } = req.body as {
+    const { prompt, style, occasion, flavor, weight, tiers, color, cakeMessage, zodiacInfluence, imageCount } = req.body as {
       prompt?: string
       style?: string
       occasion?: string
       flavor?: string
+      weight?: string
+      tiers?: string
+      color?: string
+      cakeMessage?: string
       zodiacInfluence?: { sign: string; suggestion: string }
       imageCount?: number
     }
@@ -94,6 +98,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       style,
       occasion: occasion || "",
       flavor: flavor || "",
+      weight: weight || undefined,
+      tiers: tiers || undefined,
+      color: color || undefined,
+      cakeMessage: cakeMessage?.trim() || undefined,
       zodiacInfluence: zodiacInfluence || undefined,
       imageCount: count,
     }

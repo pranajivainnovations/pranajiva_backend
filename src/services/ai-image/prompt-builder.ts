@@ -1,8 +1,8 @@
 /**
  * Cake Prompt Builder
  *
- * Takes user inputs (prompt, style, occasion, flavor, zodiac) and constructs
- * an optimized prompt for AI image generation.
+ * Takes user inputs (prompt, style, occasion, flavor, weight, tiers, color,
+ * message, zodiac) and constructs an optimized prompt for AI image generation.
  *
  * This is the cake-specialized layer. All cake domain knowledge lives here.
  * The provider layer knows nothing about cakes — it just receives a string.
@@ -69,6 +69,40 @@ const FLAVOR_VISUALS: Record<string, string> = {
     "bright citrus yellow, lemon zest garnish, fresh light appearance",
 }
 
+// ─── Weight/Size Constraints ─────────────────────────────────────────────────
+
+const WEIGHT_CONSTRAINTS: Record<string, string> = {
+  "0.5kg": "small mini cake, compact single tier, petite elegant design suitable for 2-4 people",
+  "1kg": "small single tier cake, modest size, suitable for 6-8 people",
+  "1.5kg": "medium single tier cake, generous proportions, suitable for 10-12 people",
+  "2kg": "medium-large cake, can be single or two tier, suitable for 15-20 people",
+  "3kg": "large cake, two tier design, grand proportions, suitable for 25-30 people",
+  "4kg": "very large cake, two or three tier, impressive grand design, suitable for 35-40 people",
+  "5kg": "extra large grand cake, multi-tier showpiece, spectacular design, suitable for 50+ people",
+}
+
+// ─── Tier Constraints ────────────────────────────────────────────────────────
+
+const TIER_CONSTRAINTS: Record<string, string> = {
+  "1": "single tier cake, one layer, all decoration on one level",
+  "2": "two tier cake, two stacked layers of different sizes, elegant proportions",
+  "3": "three tier tall cake, three stacked layers decreasing in size, grand impressive height",
+  "4": "four tier towering cake, four stacked layers, spectacular tall showpiece design",
+}
+
+// ─── Color Palette ───────────────────────────────────────────────────────────
+
+const COLOR_PALETTES: Record<string, string> = {
+  Pink: "dominant pink color palette, pink frosting, pink roses, blush pink decorations, soft pink tones throughout",
+  Blue: "dominant blue color palette, blue frosting, blue decorations, sky blue to navy accents",
+  White: "elegant all-white design, white frosting, white flowers, pearl white accents, pristine clean look",
+  Gold: "gold accents throughout, gold leaf details, champagne gold tones, metallic gold decorations, luxurious golden shimmer",
+  Black: "dramatic black design, black frosting, dark elegant aesthetic, black and gold accents, sophisticated dark theme",
+  Pastel: "soft pastel color palette, light pink, baby blue, mint green, lavender, gentle muted tones",
+  Rainbow: "vibrant rainbow colors, multicolored layers, bright cheerful spectrum of colors, fun colorful design",
+  "No preference": "",
+}
+
 // ─── Base System Prompt ──────────────────────────────────────────────────────
 
 const BASE_SYSTEM_PROMPT = [
@@ -76,7 +110,6 @@ const BASE_SYSTEM_PROMPT = [
   "displayed on a clean elegant surface",
   "bakery product photography",
   "no people in frame",
-  "no text or writing on the image",
   "centered composition",
   "soft natural lighting",
   "high resolution detailed",
@@ -87,13 +120,16 @@ const BASE_SYSTEM_PROMPT = [
 /**
  * Builds an optimized prompt for cake image generation.
  *
- * Combines:
- * - User's free-text description
- * - Style modifiers (photorealistic, cartoon, luxury, etc.)
- * - Occasion context (birthday, wedding, etc.)
- * - Flavor visual hints (chocolate tones, pink strawberry, etc.)
- * - Zodiac influence (optional)
- * - Base system prompt (professional cake photography)
+ * Priority order (most important first):
+ * 1. Structure constraints (tiers, weight/size) — hard physical constraints
+ * 2. User's free-text description — their core vision
+ * 3. Style modifier — visual treatment
+ * 4. Color palette — dominant visual
+ * 5. Occasion context — mood/theme
+ * 6. Flavor visual hints — color undertones
+ * 7. Cake message — text on cake
+ * 8. Zodiac influence — optional accents
+ * 9. Quality boosters
  *
  * @param request - The generation request from the user
  * @returns Fully constructed prompt string ready for the AI provider
@@ -104,35 +140,57 @@ export function buildCakePrompt(request: GenerationRequest): string {
   // 1. Base system prompt
   parts.push(BASE_SYSTEM_PROMPT)
 
-  // 2. User's description (the most important part)
+  // 2. Structure constraints (MOST IMPORTANT — defines what's physically possible)
+  if (request.tiers) {
+    const tierConstraint = TIER_CONSTRAINTS[request.tiers]
+    if (tierConstraint) parts.push(tierConstraint)
+  }
+
+  if (request.weight) {
+    const weightConstraint = WEIGHT_CONSTRAINTS[request.weight]
+    if (weightConstraint) parts.push(weightConstraint)
+  }
+
+  // 3. User's description (their core vision)
   if (request.prompt && request.prompt.trim()) {
     parts.push(request.prompt.trim())
   }
 
-  // 3. Style modifier
+  // 4. Style modifier
   const styleModifier = STYLE_MODIFIERS[request.style]
   if (styleModifier) {
     parts.push(styleModifier)
   }
 
-  // 4. Occasion context
+  // 5. Color palette (strong visual directive)
+  if (request.color && request.color !== "No preference") {
+    const colorPalette = COLOR_PALETTES[request.color]
+    if (colorPalette) parts.push(colorPalette)
+  }
+
+  // 6. Occasion context
   const occasionContext = OCCASION_CONTEXT[request.occasion]
   if (occasionContext) {
     parts.push(occasionContext)
   }
 
-  // 5. Flavor visual hints
+  // 7. Flavor visual hints
   const flavorVisual = FLAVOR_VISUALS[request.flavor]
   if (flavorVisual) {
     parts.push(flavorVisual)
   }
 
-  // 6. Zodiac influence (optional)
+  // 8. Cake message
+  if (request.cakeMessage) {
+    parts.push(`with text "${request.cakeMessage}" elegantly written on the cake`)
+  }
+
+  // 9. Zodiac influence (optional)
   if (request.zodiacInfluence && request.zodiacInfluence.suggestion) {
     parts.push(request.zodiacInfluence.suggestion)
   }
 
-  // 7. Quality boosters
+  // 10. Quality boosters
   parts.push("8k resolution, masterpiece quality, award-winning food photography")
 
   return parts.join(", ")
@@ -140,7 +198,6 @@ export function buildCakePrompt(request: GenerationRequest): string {
 
 /**
  * Generates a short title for a design based on the request.
- * Used when the AI doesn't provide its own title.
  */
 export function generateDesignTitle(request: GenerationRequest, index: number): string {
   const titleParts: string[] = []
@@ -161,8 +218,11 @@ export function generateDesignDescription(request: GenerationRequest, index: num
   const parts: string[] = []
 
   if (request.style) parts.push(`${request.style} style`)
+  if (request.tiers) parts.push(`${request.tiers} tier`)
+  if (request.weight) parts.push(request.weight)
   if (request.flavor && request.flavor !== "Vanilla") parts.push(`${request.flavor} flavored`)
   if (request.occasion) parts.push(`for ${request.occasion}`)
+  if (request.color && request.color !== "No preference") parts.push(`in ${request.color}`)
   if (request.zodiacInfluence) parts.push(`with ${request.zodiacInfluence.sign} influence`)
 
   const variation = ["Concept A", "Concept B", "Concept C"][index % 3]
