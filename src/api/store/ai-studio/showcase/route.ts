@@ -17,7 +17,7 @@ import { getAiStudioDbPool } from "../../../../services/ai-image/db"
  *
  * Response 200:
  *   {
- *     designs: [{ id, imageUrl, prompt, style, occasion, flavor,
+ *     designs: [{ id, imageUrl, prompt, compiledPrompt?, style, occasion, flavor,
  *                 likeCount, commentCount, viewCount, isLiked, createdAt }],
  *     pagination: { page, limit, total, hasMore }
  *   }
@@ -100,7 +100,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
 
     const result = await db.query(
       `SELECT
-        cd.id, cd.image_url, cd.prompt, cd.style, cd.occasion, cd.flavor,
+        cd.id, cd.image_url, cd.prompt, cd.compiled_prompt, cd.style, cd.occasion, cd.flavor,
         cd.view_count, cd.save_count, cd.comment_count,
         cd.created_at,
         (dl.id IS NOT NULL) AS is_liked
@@ -117,6 +117,10 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       id: row.id,
       imageUrl: row.image_url,
       prompt: row.prompt,
+      // Public by design — visitors can copy the exact prompt that produced
+      // this image and reuse it elsewhere. Older designs predate this column
+      // and will simply have none to show.
+      compiledPrompt: row.compiled_prompt || undefined,
       style: row.style,
       occasion: row.occasion,
       flavor: row.flavor,

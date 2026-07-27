@@ -166,9 +166,9 @@ export async function generateCakeDesigns(
       await db.query(
         `INSERT INTO ai_studio.cake_designs
           (id, generation_id, customer_id, image_url, s3_key, image_index,
-           prompt, style, occasion, flavor, zodiac_sign,
+           prompt, compiled_prompt, style, occasion, flavor, zodiac_sign,
            provider, provider_model, tags, status, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'active', NOW(), NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'active', NOW(), NOW())`,
         [
           designId,
           generationId,
@@ -177,6 +177,7 @@ export async function generateCakeDesigns(
           uploaded.key,
           uploaded.index,
           request.prompt,
+          fullPrompt,
           request.style,
           request.occasion || null,
           request.flavor || null,
@@ -193,6 +194,7 @@ export async function generateCakeDesigns(
         title,
         description,
         style: request.style,
+        compiledPrompt: fullPrompt,
       })
     }
 

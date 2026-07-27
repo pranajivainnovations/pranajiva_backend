@@ -127,4 +127,7 @@ export interface DesignOutput {
   title: string
   description: string
   style: string
+  /** The exact compiled prompt sent to the image provider — shown publicly so
+   * visitors can reuse it in other tools, not just the raw customer input. */
+  compiledPrompt?: string
 }
