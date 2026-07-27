@@ -22,7 +22,12 @@ import type { GenerationRequest } from "../../../../services/ai-image/types"
  *     imageCount?: number     (optional, default from config)
  *     imageProvider?: string  (optional — e.g. "replicate" | "openai"; falls back to AI_IMAGE_PROVIDER env default)
  *     imageModel?: string     (optional — must be on that provider's request-allowlist or it's ignored)
+ *     referenceUploadId?: string     (optional — id of a row in ai_studio.personal_uploads; ownership verified
+ *                                     server-side; purpose is read from that row itself, not passed here too)
  *   }
+ *
+ * prompt is normally required, but may be omitted if referenceUploadId is
+ * given — a customer relying purely on an uploaded photo may never type one.
  *
  * Response 200:
  *   {
@@ -74,6 +79,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       imageCount,
       imageProvider,
       imageModel,
+      referenceUploadId,
     } = req.body as {
       prompt?: string
       style?: string
@@ -89,17 +95,23 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       imageCount?: number
       imageProvider?: string
       imageModel?: string
+      referenceUploadId?: string
     }
 
-    if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
+    const hasReferenceImage = typeof referenceUploadId === "string" && referenceUploadId.length > 0
+
+    // A typed prompt is normally required, but a reference-image upload can
+    // stand in for it entirely — a customer relying purely on an uploaded
+    // photo may never type anything.
+    if ((!prompt || typeof prompt !== "string" || prompt.trim().length === 0) && !hasReferenceImage) {
       return res.status(400).json({
         success: false,
-        error: "Prompt is required.",
+        error: "Prompt is required (or upload a reference image).",
         code: "INVALID_REQUEST",
       })
     }
 
-    if (prompt.length > 500) {
+    if (prompt && prompt.length > 500) {
       return res.status(400).json({
         success: false,
         error: "Prompt must be 500 characters or less.",
@@ -121,7 +133,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // ── 3. Build generation request ────────────────────────────────────────────
     const generationRequest: GenerationRequest = {
       customerId,
-      prompt: prompt.trim(),
+      prompt: prompt?.trim() || "",
       style,
       occasion: occasion || "",
       flavor: flavor || "",
@@ -135,6 +147,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       imageCount: count,
       imageProvider: typeof imageProvider === "string" ? imageProvider : undefined,
       imageModel: typeof imageModel === "string" ? imageModel : undefined,
+      referenceUploadId: hasReferenceImage ? referenceUploadId : undefined,
     }
 
     // ── 4. Generate ────────────────────────────────────────────────────────────

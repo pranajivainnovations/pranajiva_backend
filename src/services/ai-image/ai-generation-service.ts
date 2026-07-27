@@ -28,6 +28,7 @@ import { extractTags } from "./tag-extractor"
 import { getAiStudioDbPool } from "./db"
 import { generateHoroscopeQuote } from "./horoscope-quote"
 import { elaborateCakeDesign } from "./cake-design-elaborator"
+import { analyzeReferenceImage, markUploadUsed } from "./reference-image-service"
 
 /** Generate a UUID v4 using Node.js built-in crypto */
 function uuidv4(): string {
@@ -78,41 +79,55 @@ export async function generateCakeDesigns(
       [generationId]
     )
 
-    // ── Step 3: Elaborate the design (+ horoscope quote, in parallel — both
-    // are independent LLM calls; only elaboration blocks image generation,
-    // the quote is decorative and must never block or fail it) ────────────────
-    const [designSpec, horoscopeQuote] = await Promise.all([
-      // Understanding stage: raw prompt + context → structured
-      // CakeDesignSpecification. See cake-design-elaborator.ts. Falls back
-      // to a minimal spec built from the raw fields on any failure, so this
-      // never blocks generation.
-      elaborateCakeDesign({
-        prompt: request.prompt,
-        occasion: request.occasion,
-        style: request.style,
-        flavor: request.flavor,
-        age: request.age,
-        zodiacSign: request.zodiacInfluence?.sign,
-        zodiacSuggestion: request.zodiacInfluence?.suggestion,
-        tiers: request.tiers,
-        shape: request.shape,
-        weight: request.weight,
-        cakeMessage: request.cakeMessage,
-      }),
-      // Always generated — not gated on zodiacInfluence being present. Uses
-      // the sign when given, otherwise infers a fitting sentiment from
-      // occasion/style/prompt alone.
-      generateHoroscopeQuote({
-        sign: request.zodiacInfluence?.sign,
-        age: request.age,
-        occasion: request.occasion,
-        style: request.style,
-        prompt: request.prompt,
-      }).catch((err) => {
-        console.error("[AI Generation] Horoscope quote failed, continuing without it:", err)
-        return null
-      }),
-    ])
+    // ── Step 3: Elaborate the design ────────────────────────────────────────────
+    // Kick off the horoscope quote and (if present) reference-image analysis
+    // immediately — neither depends on the other, so they run concurrently.
+    // Elaboration DOES depend on the reference-image description (it's fed
+    // in as context), so it has to wait for that one specifically; the
+    // horoscope quote is awaited separately, after, since it never blocks
+    // anything else and must never block or fail generation either.
+    const horoscopePromise = generateHoroscopeQuote({
+      sign: request.zodiacInfluence?.sign,
+      age: request.age,
+      occasion: request.occasion,
+      style: request.style,
+      prompt: request.prompt,
+    }).catch((err) => {
+      console.error("[AI Generation] Horoscope quote failed, continuing without it:", err)
+      return null
+    })
+
+    const referenceImageDescription = request.referenceUploadId
+      ? await analyzeReferenceImage({
+          uploadId: request.referenceUploadId,
+          customerId: request.customerId,
+        })
+      : null
+
+    if (referenceImageDescription) {
+      console.log(`[AI Generation] Reference image description for ${generationId}:\n${referenceImageDescription}`)
+    }
+
+    // Understanding stage: raw prompt + context (+ reference image
+    // description, if any) → structured CakeDesignSpecification. See
+    // cake-design-elaborator.ts. Falls back to a minimal spec built from the
+    // raw fields on any failure, so this never blocks generation.
+    const designSpec = await elaborateCakeDesign({
+      prompt: request.prompt,
+      occasion: request.occasion,
+      style: request.style,
+      flavor: request.flavor,
+      age: request.age,
+      zodiacSign: request.zodiacInfluence?.sign,
+      zodiacSuggestion: request.zodiacInfluence?.suggestion,
+      tiers: request.tiers,
+      shape: request.shape,
+      weight: request.weight,
+      cakeMessage: request.cakeMessage,
+      referenceImageDescription: referenceImageDescription || undefined,
+    })
+
+    const horoscopeQuote = await horoscopePromise
 
     console.log(`[AI Generation] Design specification for ${generationId}:\n${JSON.stringify(designSpec, null, 2)}`)
 
@@ -214,6 +229,10 @@ export async function generateCakeDesigns(
     console.log(
       `[AI Generation] Completed: ${generationId} | ${designs.length} images | ${durationMs}ms | provider: ${config.provider}/${config.model}`
     )
+
+    if (request.referenceUploadId) {
+      await markUploadUsed(request.referenceUploadId, generationId)
+    }
 
     // ── Step 9: Return result ──────────────────────────────────────────────────
     return {

@@ -24,7 +24,8 @@ import { GeneratedImage } from "./types"
 
 let s3Client: S3Client | null = null
 
-function getS3Client(): S3Client {
+/** Shared singleton — reused by personal-uploads-s3.ts too, so we don't spin up a second client. */
+export function getS3Client(): S3Client {
   if (s3Client) return s3Client
 
   const region = process.env.S3_REGION || "eu-north-1"

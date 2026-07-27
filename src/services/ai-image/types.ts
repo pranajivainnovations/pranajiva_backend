@@ -85,6 +85,10 @@ export interface GenerationRequest {
   imageProvider?: string
   /** Optional per-request model choice — must be on that provider's request-allowlist (see provider-factory.ts) or it's ignored */
   imageModel?: string
+  /** id of a row in ai_studio.personal_uploads — ownership is verified against customerId before it's ever read.
+   * Purpose (theme reference vs. recreate-this-cake) is read from that row itself, set once at upload time —
+   * not re-specified here, so the two can never disagree. */
+  referenceUploadId?: string
 }
 
 // ─── Generation Result (from service to API route) ───────────────────────────

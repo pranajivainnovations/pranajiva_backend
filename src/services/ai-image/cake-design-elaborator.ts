@@ -32,6 +32,8 @@ export interface ElaborationInput {
   weight?: string
   /** If the customer already typed an explicit on-cake message, personalizedText must stay empty to avoid competing text instructions */
   cakeMessage?: string
+  /** Text description of an uploaded reference image, produced by the separate vision-analysis step (see vision/) — never the raw image itself, this module never sees pixels */
+  referenceImageDescription?: string
 }
 
 import { CakeDesignSpecification } from "./types"
@@ -100,11 +102,16 @@ if it fits the primary concept thematically (e.g. skip a "crown topper" suggesti
 second, competing piece of on-cake text.
 - Preserve every concrete detail the customer explicitly gave (names, exact colors, shapes, objects) — reflect \
 them in the specification, never drop or contradict them.
+- If a reference image description is given, treat it as important customer intent, same weight as their own \
+typed words — it already reflects the right level of literalness (loose inspiration vs. precise recreation) \
+for its purpose, so just weave its key visual elements into primaryConcept/secondaryElements like any other \
+concrete detail, still respecting the overcrowding cap.
 - Output ONLY the JSON object. No markdown fences, no commentary, no preamble.`
 
 function buildUserMessage(input: ElaborationInput, ageLanguageHint?: string): string {
   const lines = [
-    `Customer's request: ${input.prompt.trim()}`,
+    input.prompt.trim() ? `Customer's request: ${input.prompt.trim()}` : null,
+    input.referenceImageDescription ? `Reference image the customer uploaded, described: ${input.referenceImageDescription}` : null,
     input.occasion ? `Occasion: ${input.occasion}` : null,
     input.style ? `Style: ${input.style}` : null,
     input.flavor ? `Flavor: ${input.flavor}` : null,
@@ -184,7 +191,10 @@ async function callAnthropic(system: string, userMessage: string, apiKey: string
 /** Minimal spec built with no LLM call — used whenever elaboration is unavailable or fails twice. */
 function fallbackSpecification(input: ElaborationInput): CakeDesignSpecification {
   return {
-    primaryConcept: input.prompt.trim() || `A cake for the occasion${input.occasion ? `: ${input.occasion}` : ""}`,
+    primaryConcept:
+      input.prompt.trim() ||
+      input.referenceImageDescription ||
+      `A cake for the occasion${input.occasion ? `: ${input.occasion}` : ""}`,
     secondaryElements: [],
     mood: [],
     ageDesignLanguage: ageDesignLanguage(input.age),
@@ -200,7 +210,9 @@ export async function elaborateCakeDesign(input: ElaborationInput): Promise<Cake
   const apiKey = process.env.ANTHROPIC_API_KEY
   const ageLanguage = ageDesignLanguage(input.age)
 
-  if (!apiKey || !input.prompt.trim()) {
+  // A reference image description is enough to elaborate from on its own —
+  // a customer relying purely on an uploaded photo may never type a prompt.
+  if (!apiKey || (!input.prompt.trim() && !input.referenceImageDescription)) {
     return fallbackSpecification(input)
   }
 
