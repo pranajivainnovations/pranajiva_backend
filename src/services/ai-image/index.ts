@@ -17,10 +17,14 @@ export type {
   GeneratedImage,
   ImageProvider,
   ProviderConfig,
+  CakeDesignSpecification,
 } from "./types"
 
 // Provider factory (for testing/admin)
 export { getImageProvider, getProviderConfig, resetProvider } from "./provider-factory"
+
+// Design elaborator (understanding stage — for testing/preview)
+export { elaborateCakeDesign } from "./cake-design-elaborator"
 
 // Prompt builder (for testing/preview)
 export { buildCakePrompt, generateDesignTitle, generateDesignDescription } from "./prompt-builder"

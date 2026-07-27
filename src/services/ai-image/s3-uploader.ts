@@ -99,20 +99,35 @@ function buildPublicUrl(s3Key: string): string {
 async function uploadSingleImage(providerUrl: string, s3Key: string): Promise<string> {
   const bucket = process.env.S3_BUCKET || "pranajiva-innovations"
 
-  // 1. Download image from provider's temporary URL
-  const response = await fetch(providerUrl)
+  let buffer: Buffer
+  let contentType: string
 
-  if (!response.ok) {
-    throw new Error(
-      `[S3 Uploader] Failed to download image from provider: ${response.status} ${response.statusText}`
-    )
+  if (providerUrl.startsWith("data:")) {
+    // Some providers (e.g. OpenAI's gpt-image-1) return images inline as
+    // base64 rather than a temporary HTTP URL — decode directly instead of
+    // routing through fetch, which isn't guaranteed to support data: URLs.
+    const match = providerUrl.match(/^data:([^;]+);base64,(.*)$/s)
+    if (!match) {
+      throw new Error("[S3 Uploader] Malformed data: URL from provider")
+    }
+    contentType = match[1] || "image/png"
+    buffer = Buffer.from(match[2], "base64")
+  } else {
+    // 1. Download image from provider's temporary URL
+    const response = await fetch(providerUrl)
+
+    if (!response.ok) {
+      throw new Error(
+        `[S3 Uploader] Failed to download image from provider: ${response.status} ${response.statusText}`
+      )
+    }
+
+    const arrayBuffer = await response.arrayBuffer()
+    buffer = Buffer.from(arrayBuffer)
+
+    // Detect content type from response headers or default to png
+    contentType = response.headers.get("content-type") || "image/png"
   }
-
-  const arrayBuffer = await response.arrayBuffer()
-  const buffer = Buffer.from(arrayBuffer)
-
-  // Detect content type from response headers or default to png
-  const contentType = response.headers.get("content-type") || "image/png"
 
   // 2. Upload to S3
   const client = getS3Client()

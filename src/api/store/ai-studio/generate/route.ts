@@ -13,8 +13,15 @@ import type { GenerationRequest } from "../../../../services/ai-image/types"
  *     style: string           (required)
  *     occasion: string        (optional)
  *     flavor: string          (optional)
+ *     weight?: string
+ *     tiers?: string
+ *     shape?: string
+ *     color?: string
+ *     cakeMessage?: string
  *     zodiacInfluence?: { sign: string, suggestion: string }
  *     imageCount?: number     (optional, default from config)
+ *     imageProvider?: string  (optional — e.g. "replicate" | "openai"; falls back to AI_IMAGE_PROVIDER env default)
+ *     imageModel?: string     (optional — must be on that provider's request-allowlist or it's ignored)
  *   }
  *
  * Response 200:
@@ -22,7 +29,8 @@ import type { GenerationRequest } from "../../../../services/ai-image/types"
  *     success: true,
  *     generationId: string,
  *     designs: [{ id, imageUrl, title, description, style }],
- *     creditsRemaining: number
+ *     creditsRemaining: number,
+ *     horoscopeQuote?: string   (present only when zodiacInfluence was sent and generation succeeded)
  *   }
  *
  * Response 401: Not authenticated
@@ -51,17 +59,36 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     }
 
     // ── 2. Validate request body ───────────────────────────────────────────────
-    const { prompt, style, occasion, flavor, weight, tiers, color, cakeMessage, zodiacInfluence, imageCount } = req.body as {
+    const {
+      prompt,
+      style,
+      occasion,
+      flavor,
+      weight,
+      tiers,
+      shape,
+      color,
+      cakeMessage,
+      zodiacInfluence,
+      age,
+      imageCount,
+      imageProvider,
+      imageModel,
+    } = req.body as {
       prompt?: string
       style?: string
       occasion?: string
       flavor?: string
       weight?: string
       tiers?: string
+      shape?: string
       color?: string
       cakeMessage?: string
       zodiacInfluence?: { sign: string; suggestion: string }
+      age?: number
       imageCount?: number
+      imageProvider?: string
+      imageModel?: string
     }
 
     if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
@@ -100,10 +127,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       flavor: flavor || "",
       weight: weight || undefined,
       tiers: tiers || undefined,
+      shape: shape || undefined,
       color: color || undefined,
       cakeMessage: cakeMessage?.trim() || undefined,
       zodiacInfluence: zodiacInfluence || undefined,
+      age: typeof age === "number" && age > 0 ? age : undefined,
       imageCount: count,
+      imageProvider: typeof imageProvider === "string" ? imageProvider : undefined,
+      imageModel: typeof imageModel === "string" ? imageModel : undefined,
     }
 
     // ── 4. Generate ────────────────────────────────────────────────────────────
@@ -122,6 +153,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       generationId: result.generationId,
       designs: result.designs,
       creditsRemaining: result.creditsRemaining,
+      horoscopeQuote: result.horoscopeQuote,
     })
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error"
@@ -131,7 +163,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // Determine if it's a provider error or internal error
     const isProviderError =
       errorMessage.includes("[Replicate]") ||
-      errorMessage.includes("[OpenAI]") ||
+      errorMessage.includes("[OpenAI Image]") ||
+      errorMessage.includes("[Gemini Image]") ||
       errorMessage.includes("[Stability]") ||
       errorMessage.includes("Provider returned zero images")
 

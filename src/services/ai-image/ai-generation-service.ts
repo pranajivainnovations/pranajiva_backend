@@ -19,33 +19,19 @@
  * It focuses purely on: prompt → images → storage → response
  */
 
-import { Pool } from "pg"
 import crypto from "crypto"
 import { GenerationRequest, GenerationResult, DesignOutput, GenerateOptions } from "./types"
 import { getImageProvider, getProviderConfig } from "./provider-factory"
 import { buildCakePrompt, generateDesignTitle, generateDesignDescription } from "./prompt-builder"
 import { uploadGeneratedImages, UploadedImage } from "./s3-uploader"
 import { extractTags } from "./tag-extractor"
-
-// ─── Database connection (reuses Medusa's DATABASE_URL) ──────────────────────
-
-let pool: Pool | null = null
+import { getAiStudioDbPool } from "./db"
+import { generateHoroscopeQuote } from "./horoscope-quote"
+import { elaborateCakeDesign } from "./cake-design-elaborator"
 
 /** Generate a UUID v4 using Node.js built-in crypto */
 function uuidv4(): string {
   return crypto.randomUUID()
-}
-
-function getPool(): Pool {
-  if (pool) return pool
-
-  const connectionString = process.env.DATABASE_URL
-  if (!connectionString) {
-    throw new Error("[AI Generation] DATABASE_URL is not set")
-  }
-
-  pool = new Pool({ connectionString, max: 5 })
-  return pool
 }
 
 // ─── Main Generation Function ────────────────────────────────────────────────
@@ -60,8 +46,9 @@ function getPool(): Pool {
 export async function generateCakeDesigns(
   request: GenerationRequest
 ): Promise<GenerationResult> {
-  const db = getPool()
-  const config = getProviderConfig()
+  const db = getAiStudioDbPool()
+  const providerOverride = { provider: request.imageProvider, model: request.imageModel }
+  const config = getProviderConfig(providerOverride)
   const generationId = uuidv4()
   const startTime = Date.now()
 
@@ -91,11 +78,61 @@ export async function generateCakeDesigns(
       [generationId]
     )
 
-    // ── Step 3: Build the optimized prompt ─────────────────────────────────────
-    const fullPrompt = buildCakePrompt(request)
+    // ── Step 3: Elaborate the design (+ horoscope quote, in parallel — both
+    // are independent LLM calls; only elaboration blocks image generation,
+    // the quote is decorative and must never block or fail it) ────────────────
+    const [designSpec, horoscopeQuote] = await Promise.all([
+      // Understanding stage: raw prompt + context → structured
+      // CakeDesignSpecification. See cake-design-elaborator.ts. Falls back
+      // to a minimal spec built from the raw fields on any failure, so this
+      // never blocks generation.
+      elaborateCakeDesign({
+        prompt: request.prompt,
+        occasion: request.occasion,
+        style: request.style,
+        flavor: request.flavor,
+        age: request.age,
+        zodiacSign: request.zodiacInfluence?.sign,
+        zodiacSuggestion: request.zodiacInfluence?.suggestion,
+        tiers: request.tiers,
+        shape: request.shape,
+        weight: request.weight,
+        cakeMessage: request.cakeMessage,
+      }),
+      // Always generated — not gated on zodiacInfluence being present. Uses
+      // the sign when given, otherwise infers a fitting sentiment from
+      // occasion/style/prompt alone.
+      generateHoroscopeQuote({
+        sign: request.zodiacInfluence?.sign,
+        age: request.age,
+        occasion: request.occasion,
+        style: request.style,
+        prompt: request.prompt,
+      }).catch((err) => {
+        console.error("[AI Generation] Horoscope quote failed, continuing without it:", err)
+        return null
+      }),
+    ])
 
-    // ── Step 4: Call AI provider ───────────────────────────────────────────────
-    const provider = getImageProvider()
+    console.log(`[AI Generation] Design specification for ${generationId}:\n${JSON.stringify(designSpec, null, 2)}`)
+
+    // ── Step 4: Compile the final prompt (deterministic — no LLM here) and
+    // call the AI provider ──────────────────────────────────────────────────
+    const fullPrompt = buildCakePrompt(request, designSpec)
+    console.log(`[AI Generation] Full prompt for ${generationId}:\n${fullPrompt}`)
+
+    // Persist the specification + compiled prompt now, so a generation is
+    // reproducible/debuggable from the DB even if the provider call below fails.
+    await db.query(
+      `UPDATE ai_studio.generations
+       SET structured_specification = $2, compiled_prompt = $3
+       WHERE id = $1`,
+      [generationId, JSON.stringify(designSpec), fullPrompt]
+    ).catch((err) => {
+      console.error("[AI Generation] Failed to persist structured specification:", err)
+    })
+
+    const provider = getImageProvider(providerOverride)
     const imageCount = request.imageCount || config.imageCount
 
     const options: GenerateOptions = {
@@ -181,6 +218,7 @@ export async function generateCakeDesigns(
       generationId,
       designs,
       creditsRemaining: -1, // Will be set by the credits service (caller)
+      horoscopeQuote: horoscopeQuote || undefined,
     }
   } catch (error) {
     // ── Handle failure ─────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@
 yarn-error.log
 
 .idea
+*.tgz
 
 coverage
 
@@ -25,3 +26,5 @@ pranajivainnovationpem.pem
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+*.tgz
