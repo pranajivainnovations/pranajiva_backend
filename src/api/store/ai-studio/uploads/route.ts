@@ -1,6 +1,6 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { runSingleFileUpload } from "../../../../services/ai-image/multer-runner"
-import { validateUpload } from "../../../../services/ai-image/upload-validation"
+import { validateUpload, MAX_UPLOAD_BYTES } from "../../../../services/ai-image/upload-validation"
 import { storeReferenceUpload } from "../../../../services/ai-image/personal-uploads-s3"
 import { getAiStudioDbPool } from "../../../../services/ai-image/db"
 import crypto from "crypto"
@@ -40,10 +40,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   try {
     await runSingleFileUpload(req, res, "file")
   } catch (error) {
+    // Multer's own "File too large" message isn't customer-friendly and
+    // doesn't say what limit applies — surface the same wording/limit as
+    // validateUpload() below so the message is consistent either way.
+    const isFileTooLarge = (error as { code?: string })?.code === "LIMIT_FILE_SIZE"
     return res.status(400).json({
       success: false,
-      error: error instanceof Error ? error.message : "Upload failed.",
-      code: "UPLOAD_ERROR",
+      error: isFileTooLarge
+        ? `Image must be under ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB.`
+        : error instanceof Error
+          ? error.message
+          : "Upload failed.",
+      code: isFileTooLarge ? "FILE_TOO_LARGE" : "UPLOAD_ERROR",
     })
   }
 
