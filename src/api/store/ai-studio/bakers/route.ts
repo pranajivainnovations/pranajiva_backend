@@ -29,6 +29,12 @@ const BAKER_ORDER = `
  * a real-world "nearby pincodes like 201016/201009" case, without needing lat/lng distance math we
  * don't have reliable data for yet. matchType on the response tells the frontend which happened.
  *
+ * Visibility requires BOTH is_active=true AND status='onboarded' — is_active is the pause/resume
+ * switch, status is the CRM pipeline stage. A baker freshly promoted from a Google discovery starts
+ * at status='prospect' with is_active defaulting true — without this check they'd be visible to real
+ * customers before anyone has actually confirmed the partnership, which is a real business risk, not
+ * just a data-hygiene nicety.
+ *
  * Public — no auth required, matches the pre-existing fake route's behavior.
  */
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
@@ -57,7 +63,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     const exactResult = await db.query(
       `SELECT ${BAKER_FIELDS}
        FROM baker_network.bakers
-       WHERE is_active = true AND (pincode = $1 OR $1 = ANY(serviceable_pincodes))
+       WHERE is_active = true AND status = 'onboarded' AND (pincode = $1 OR $1 = ANY(serviceable_pincodes))
        ${BAKER_ORDER}`,
       [pincode]
     )
@@ -79,7 +85,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         const nearbyResult = await db.query(
           `SELECT ${BAKER_FIELDS}
            FROM baker_network.bakers b
-           WHERE is_active = true
+           WHERE is_active = true AND status = 'onboarded'
              AND EXISTS (
                SELECT 1 FROM baker_network.pincode_directory pd
                WHERE pd.pincode = b.pincode AND pd.district = ANY($1)
