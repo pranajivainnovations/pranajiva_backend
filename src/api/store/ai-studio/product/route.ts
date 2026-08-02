@@ -1,5 +1,42 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { evaluatePrice, persistEvaluation } from "../../../../services/pricing/pricing-engine"
+import { getAiStudioDbPool } from "../../../../services/ai-image/db"
+
+/**
+ * Looks up an existing (design_id, customer_id) → product/variant link. DB is authoritative over
+ * whatever the frontend's React state remembers — a page reload or re-picking the same design from
+ * the gallery loses that state, but this lookup still finds the customer's already-created product,
+ * so a retry never creates a duplicate.
+ */
+async function findLinkedProduct(
+  designId: string,
+  customerId: string
+): Promise<{ productId: string; variantId: string } | null> {
+  const db = getAiStudioDbPool()
+  const res = await db.query(
+    `SELECT medusa_product_id, medusa_variant_id FROM ai_studio.design_products
+     WHERE design_id = $1 AND customer_id = $2`,
+    [designId, customerId]
+  )
+  if (res.rows.length === 0) return null
+  return { productId: res.rows[0].medusa_product_id, variantId: res.rows[0].medusa_variant_id }
+}
+
+async function linkProduct(
+  designId: string,
+  customerId: string,
+  productId: string,
+  variantId: string
+): Promise<void> {
+  const db = getAiStudioDbPool()
+  await db.query(
+    `INSERT INTO ai_studio.design_products (design_id, customer_id, medusa_product_id, medusa_variant_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (design_id, customer_id)
+     DO UPDATE SET medusa_product_id = $3, medusa_variant_id = $4, updated_at = NOW()`,
+    [designId, customerId, productId, variantId]
+  )
+}
 
 /**
  * Builds a real, descriptive, SEO-friendly title from the actual selections — never a flat generic
@@ -36,15 +73,25 @@ function buildCakeTitle(input: {
  * price, so adding it to a cart is genuinely standard Medusa — no custom pricing route needed, and
  * nothing for Medusa's own repricing logic to ever clobber, because there's no override to clobber.
  *
- * Called once when the customer commits to searching for a baker (all price-determining selections
- * are final at that point) — not at Generate or "Use this design," both of which are too early and
- * too exploratory (most generated/selected designs are never priced out, let alone ordered). If the
- * customer goes back and changes a selection afterward, the same productId/variantId is passed back
- * in and this route updates the existing product instead of creating a duplicate.
+ * Called once when the customer clicks "Order Now" on a specific baker (all price-determining
+ * selections are final at that point) — not at Generate or "Use this design," both of which are too
+ * early and too exploratory (most generated/selected designs are never priced out, let alone
+ * ordered). If the customer goes back and changes a selection afterward, the same productId/variantId
+ * is passed back in and this route updates the existing product instead of creating a duplicate.
+ *
+ * Duplicate protection is two-layered: the frontend passes back productId/variantId once it has them
+ * in React state (cheapest, no DB round trip), but that state is lost on a page reload or when the
+ * same design is re-picked from the showcase gallery in a fresh session. For that case, pass
+ * `designId` (the ai_studio.cake_designs id) — this route looks up ai_studio.design_products for an
+ * existing (designId, customerId) link and treats that as authoritative over whatever the client
+ * sent, so a lost-state retry updates the customer's existing product instead of creating a second
+ * one. The link is scoped per-customer, not global on the design, since a showcase design can be
+ * picked by many different customers and each must get their own product/variant.
  *
  * Request body:
  *   {
  *     productId?, variantId?: string    (pass both to update an already-created product instead of creating a new one)
+ *     designId?: string                 (ai_studio.cake_designs id — enables DB-backed dedup, see above)
  *     weight: string                    (required, e.g. "1.5")
  *     tiers?, shape?, style?, flavor?, occasion?: string
  *     expressDelivery?, midnightDelivery?, messageOnCake?, photoOnCake?: boolean
@@ -77,6 +124,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       pincode?: string
       designImageUrl?: string
       compiledPrompt?: string
+      designId?: string
     }
 
     if (!body.weight || typeof body.weight !== "string") {
@@ -105,6 +153,20 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     })
 
     const customerId = req.user?.customer_id
+
+    // DB is authoritative over whatever productId/variantId the frontend's React state remembers —
+    // a page reload or re-picking the same design from the gallery loses that state, so if this
+    // customer already has a product linked to this exact design, use it instead of trusting (or
+    // ignoring) whatever the client happened to send.
+    let targetProductId = body.productId
+    let targetVariantId = body.variantId
+    if (body.designId && customerId) {
+      const linked = await findLinkedProduct(body.designId, customerId)
+      if (linked) {
+        targetProductId = linked.productId
+        targetVariantId = linked.variantId
+      }
+    }
 
     const evaluationId = await persistEvaluation({
       result,
@@ -146,25 +208,29 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
     const productService = req.scope.resolve("productService")
 
-    if (body.productId && body.variantId) {
+    if (targetProductId && targetVariantId) {
       // Selections changed since this design's product was first created — update it in place
       // rather than creating a duplicate for the same design. Title/description/thumbnail live on
       // the product; price/metadata live on the variant — updating the variant alone silently
       // leaves the old title in place (caught live: price updated correctly, title didn't).
-      await productService.update(body.productId, {
+      await productService.update(targetProductId, {
         title,
         description: body.compiledPrompt || "AI-designed custom cake",
         thumbnail: body.designImageUrl,
         metadata,
       })
-      await productVariantService.update(body.variantId, {
+      await productVariantService.update(targetVariantId, {
         prices: [{ currency_code: "inr", amount: unitPrice }],
         metadata,
       })
 
+      if (body.designId && customerId) {
+        await linkProduct(body.designId, customerId, targetProductId, targetVariantId)
+      }
+
       return res.status(200).json({
-        productId: body.productId,
-        variantId: body.variantId,
+        productId: targetProductId,
+        variantId: targetVariantId,
         total: result.total,
         breakdown: result.breakdown,
         evaluationId,
@@ -205,6 +271,10 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     // explicitly rather than assume its shape.
     const product = await productService.retrieve(created.id, { relations: ["variants"] })
     const variant = product.variants[0]
+
+    if (body.designId && customerId) {
+      await linkProduct(body.designId, customerId, product.id, variant.id)
+    }
 
     return res.status(200).json({
       productId: product.id,
