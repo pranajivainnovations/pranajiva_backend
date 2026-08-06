@@ -1,5 +1,6 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { evaluatePrice, persistEvaluation } from "../../../../services/pricing/pricing-engine"
+import { evaluateConstraints } from "../../../../services/constraints/constraint-engine"
 import { getAiStudioDbPool } from "../../../../services/ai-image/db"
 
 /**
@@ -143,6 +144,28 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       midnight_delivery: body.midnightDelivery,
       message_on_cake: body.messageOnCake,
       photo_on_cake: body.photoOnCake,
+    }
+
+    // Save-time backstop — the storefront is expected to keep the customer from picking a disabled
+    // combination in the first place (using this same engine's output from /store/ai-studio/price),
+    // but nothing has been written yet at this point, so it costs nothing to also refuse here in case
+    // that client-side state is stale or bypassed entirely.
+    const constraintCheck = await evaluateConstraints({
+      categoryKey: "cake",
+      selections: {
+        weight: body.weight,
+        tiers: body.tiers,
+        shape: body.shape,
+        style: body.style,
+        flavor: body.flavor,
+        express_delivery: body.expressDelivery ? "on" : undefined,
+        midnight_delivery: body.midnightDelivery ? "on" : undefined,
+        message_on_cake: body.messageOnCake ? "on" : undefined,
+        photo_on_cake: body.photoOnCake ? "on" : undefined,
+      },
+    })
+    if (constraintCheck.violations.length > 0) {
+      return res.status(400).json({ error: constraintCheck.violations.map((v) => v.message).join(" ") })
     }
 
     const result = await evaluatePrice({

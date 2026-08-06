@@ -1,5 +1,6 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { evaluatePrice, persistEvaluation } from "../../../../services/pricing/pricing-engine"
+import { evaluateConstraints } from "../../../../services/constraints/constraint-engine"
 
 /**
  * POST /store/ai-studio/price
@@ -8,6 +9,11 @@ import { evaluatePrice, persistEvaluation } from "../../../../services/pricing/p
  * never trusts a client-sent total. Replaces the old purely-client-side Price Estimator math for
  * anything that needs a real number (checkout). The live estimator UI can keep doing fast client
  * preview math for responsiveness, but only this route's number is ever used for an actual order.
+ *
+ * Also returns option-validity state from the (independent) constraints engine in the same response —
+ * one request answers both "how much" and "what's allowed," so the frontend can grey out invalid
+ * choices without a second round trip. Pricing and constraints are evaluated as two unrelated calls
+ * that this route composes; neither engine knows the other exists.
  *
  * Request body:
  *   {
@@ -27,7 +33,7 @@ import { evaluatePrice, persistEvaluation } from "../../../../services/pricing/p
  *                                                      itself, not trust this passthrough)
  *   }
  *
- * Response 200: { total, breakdown: [{label, amount}], evaluationId }
+ * Response 200: { total, breakdown: [{label, amount}], evaluationId, constraints: { options, violations } }
  * Response 400: bad input (unknown weight, missing weight)
  * Response 500: internal error
  *
@@ -67,13 +73,34 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       photo_on_cake: body.photoOnCake,
     }
 
-    const result = await evaluatePrice({
-      categoryKey: "cake",
-      pincode: body.pincode,
+    // The constraints engine works on plain string value tokens per attribute (it doesn't know what a
+    // "boolean toggle" is) — translate booleans to the "on" token the same way evaluatePrice does
+    // internally, so both engines see an equivalent selection for these attributes.
+    const constraintSelections = {
       weight: body.weight,
-      selections,
-      addons: body.addons,
-    })
+      tiers: body.tiers,
+      shape: body.shape,
+      style: body.style,
+      flavor: body.flavor,
+      express_delivery: body.expressDelivery ? "on" : undefined,
+      midnight_delivery: body.midnightDelivery ? "on" : undefined,
+      message_on_cake: body.messageOnCake ? "on" : undefined,
+      photo_on_cake: body.photoOnCake ? "on" : undefined,
+    }
+
+    const [result, constraintResult] = await Promise.all([
+      evaluatePrice({
+        categoryKey: "cake",
+        pincode: body.pincode,
+        weight: body.weight,
+        selections,
+        addons: body.addons,
+      }),
+      evaluateConstraints({
+        categoryKey: "cake",
+        selections: constraintSelections,
+      }),
+    ])
 
     const evaluationId = await persistEvaluation({
       result,
@@ -86,6 +113,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       total: result.total,
       breakdown: result.breakdown.map((b) => ({ label: b.label, amount: b.amount })),
       evaluationId,
+      constraints: { options: constraintResult.options, violations: constraintResult.violations },
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error"
