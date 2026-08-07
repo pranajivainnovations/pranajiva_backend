@@ -94,10 +94,11 @@ interface ConstraintContext {
 
 const CACHE_TTL_MS = 30_000
 const ruleSetCache = new Map<string, { categoryId: string; rules: ResolvedRule[]; expiresAt: number }>()
+const catalogCache = new Map<string, { catalog: CatalogAttribute[]; expiresAt: number }>()
 
 async function loadRuleSetForCategory(
   categoryKey: string
-): Promise<{ categoryId: string; rules: ResolvedRule[] } | null> {
+): Promise<{ categoryId: string; rules: ResolvedRule[] }> {
   const cached = ruleSetCache.get(categoryKey)
   if (cached && cached.expiresAt > Date.now()) {
     return { categoryId: cached.categoryId, rules: cached.rules }
@@ -174,8 +175,11 @@ async function loadRuleSetForCategory(
 
 // ─── Phase 1 — resolve ────────────────────────────────────────────────────────
 
-async function resolveContext(categoryKey: string, selections: Record<string, string | undefined>): Promise<ConstraintContext> {
-  const { categoryId, rules } = (await loadRuleSetForCategory(categoryKey))!
+async function loadCatalog(categoryKey: string, categoryId: string): Promise<CatalogAttribute[]> {
+  const cached = catalogCache.get(categoryKey)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.catalog
+  }
 
   const pool = getConstraintsDbPool()
   const catalogRes = await pool.query(
@@ -197,6 +201,20 @@ async function resolveContext(categoryKey: string, selections: Record<string, st
     entry.values.push({ id: row.value_id, value: row.value })
   }
   const catalog = [...catalogByKey.values()]
+
+  catalogCache.set(categoryKey, { catalog, expiresAt: Date.now() + CACHE_TTL_MS })
+  return catalog
+}
+
+async function resolveContext(categoryKey: string, selections: Record<string, string | undefined>): Promise<ConstraintContext> {
+  // The attribute catalog changes about as rarely as the rules do (an OPS edit), and this used to be
+  // an uncached query on every single price request — which would have made constraints the slowest
+  // part of the response now that pricing is down to three round trips. Same TTL as the rule cache,
+  // so both go stale and refresh together.
+  const { categoryId, rules } = await loadRuleSetForCategory(categoryKey)
+  const catalog = await loadCatalog(categoryKey, categoryId)
+
+  const catalogByKey = new Map(catalog.map((attr) => [attr.key, attr]))
 
   const selectedValueIds: Record<string, string> = {}
   for (const [key, value] of Object.entries(selections)) {
@@ -251,9 +269,13 @@ function applyRuleEffects(ctx: ConstraintContext, triggeredRules: ResolvedRule[]
   }))
   const optionsByKey = new Map(options.map((o) => [o.attributeKey, o]))
 
-  // Rules that disable are applied first, highest priority first, so a lower-priority rule's message
-  // never overwrites a higher-priority one's on the same value; recommendations applied after so they
-  // never get clobbered by a later disable's reason on the same value.
+  // Highest priority first, so that when several rules disable the same value the message the customer
+  // sees is the highest-priority one — `enabled` is only ever flipped by the first rule to disable a
+  // value (see the `valueState.enabled` guard below), and priority never changes *whether* a value is
+  // disabled, only which explanation wins. Recommendation rules take part in the same ordering; a
+  // recommendation's message can still be replaced if a lower-priority rule later disables that same
+  // value, which is the right outcome — "unavailable, because X" is more useful to show than
+  // "recommended, because Y" for a value the customer cannot pick.
   const sorted = [...triggeredRules].sort((a, b) => b.priority - a.priority)
 
   for (const rule of sorted) {

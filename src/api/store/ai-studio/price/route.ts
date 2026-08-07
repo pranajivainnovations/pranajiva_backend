@@ -27,11 +27,14 @@ import { evaluateConstraints } from "../../../../services/constraints/constraint
  *     messageOnCake?: boolean
  *     photoOnCake?: boolean
  *     pincode?: string            (6 digits — used for region resolution, "coming soon" pincodes still price fine)
- *     addons?: { label: string, amount: number }[]   (see pricing-engine.ts — NOT re-verified here yet;
- *                                                      the cart/order route that actually spends this
- *                                                      number must resolve addon prices from Medusa
- *                                                      itself, not trust this passthrough)
  *   }
+ *
+ * Deliberately does NOT accept `addons`. The evaluator supports add-on lines, but their amounts must
+ * be resolved server-side from Medusa's own product/variant data — accepting them from the request
+ * body let a caller post any amount (including a negative one) and get a total back to match, which
+ * both poisoned the pricing.price_evaluations audit trail and would have become a real payment bypass
+ * the moment this number was wired into the order path. When add-ons become real, resolve their
+ * prices here from their Medusa variant ids; never from the request.
  *
  * Response 200: { total, breakdown: [{label, amount}], evaluationId, constraints: { options, violations } }
  * Response 400: bad input (unknown weight, missing weight)
@@ -52,7 +55,6 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       messageOnCake?: boolean
       photoOnCake?: boolean
       pincode?: string
-      addons?: { label: string; amount: number }[]
     }
 
     if (!body.weight || typeof body.weight !== "string") {
@@ -94,7 +96,6 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         pincode: body.pincode,
         weight: body.weight,
         selections,
-        addons: body.addons,
       }),
       evaluateConstraints({
         categoryKey: "cake",
@@ -105,7 +106,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     const evaluationId = await persistEvaluation({
       result,
       pincode: body.pincode,
-      selections: { weight: body.weight, ...selections, addons: body.addons },
+      selections: { weight: body.weight, ...selections },
       customerId: req.user?.customer_id,
     })
 
