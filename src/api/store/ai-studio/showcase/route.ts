@@ -81,7 +81,11 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         break
       case "popular":
       default:
-        orderClause = "save_count DESC, view_count DESC, created_at DESC"
+        // order_count leads: a design people actually configured and priced is a stronger popularity
+        // signal than one that collected likes. It's also the column that stayed at zero until views
+        // and orders were finally being recorded, which is why this sort used to collapse to
+        // created_at and quietly serve newest-first under a "Popular" label.
+        orderClause = "order_count DESC, save_count DESC, view_count DESC, created_at DESC"
         break
     }
 
@@ -101,6 +105,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
     const result = await db.query(
       `SELECT
         cd.id, cd.image_url, cd.prompt, cd.compiled_prompt, cd.style, cd.occasion, cd.flavor,
+        cd.weight, cd.tiers, cd.shape,
         cd.view_count, cd.save_count, cd.comment_count,
         cd.created_at,
         (dl.id IS NOT NULL) AS is_liked
@@ -124,6 +129,11 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       style: row.style,
       occasion: row.occasion,
       flavor: row.flavor,
+      // The physical spec the image depicts. Undefined for designs generated before these were
+      // recorded — the studio falls back to its own defaults rather than guessing a size.
+      weight: row.weight || undefined,
+      tiers: row.tiers || undefined,
+      shape: row.shape || undefined,
       likeCount: row.save_count || 0,
       commentCount: row.comment_count || 0,
       viewCount: row.view_count || 0,

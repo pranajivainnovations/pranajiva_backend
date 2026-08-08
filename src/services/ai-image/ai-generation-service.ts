@@ -179,11 +179,15 @@ export async function generateCakeDesigns(
       const description = generateDesignDescription(request, uploaded.index)
 
       await db.query(
+        // weight/tiers/shape are stored alongside style/occasion/flavor because they're what the
+        // image actually depicts — a three tier heart cake looks nothing like a 0.5 kg round one, and
+        // the prompt above already bakes them in. Without them a design can be adopted later and
+        // priced as something it visibly isn't. See migration 1723300000000.
         `INSERT INTO ai_studio.cake_designs
           (id, generation_id, customer_id, image_url, s3_key, image_index,
            prompt, compiled_prompt, style, occasion, flavor, zodiac_sign,
-           provider, provider_model, tags, status, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'active', NOW(), NOW())`,
+           provider, provider_model, tags, weight, tiers, shape, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'active', NOW(), NOW())`,
         [
           designId,
           generationId,
@@ -200,6 +204,9 @@ export async function generateCakeDesigns(
           config.provider,
           config.model,
           tags,
+          request.weight || null,
+          request.tiers || null,
+          request.shape || null,
         ]
       )
 

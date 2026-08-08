@@ -30,13 +30,29 @@ async function linkProduct(
   variantId: string
 ): Promise<void> {
   const db = getAiStudioDbPool()
-  await db.query(
+  const linked = await db.query(
     `INSERT INTO ai_studio.design_products (design_id, customer_id, medusa_product_id, medusa_variant_id)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (design_id, customer_id)
-     DO UPDATE SET medusa_product_id = $3, medusa_variant_id = $4, updated_at = NOW()`,
+     DO UPDATE SET medusa_product_id = $3, medusa_variant_id = $4, updated_at = NOW()
+     RETURNING (xmax = 0) AS inserted`,
     [designId, customerId, productId, variantId]
   )
+
+  // `cake_designs.order_count` existed from the original schema but nothing ever wrote to it, so every
+  // design read as never-ordered. Count it here — the moment a customer commits to a design and it
+  // becomes a real priced product — rather than at order completion, because that's the signal the
+  // showcase gallery actually wants: how many people wanted this cake enough to configure it for real.
+  //
+  // Only on a genuine INSERT. `xmax = 0` distinguishes an inserted row from one the ON CONFLICT branch
+  // updated, so the same customer re-saving the same design (a reload, a tweak, re-picking it from the
+  // gallery) doesn't inflate the number.
+  if (linked.rows[0]?.inserted) {
+    await db.query(
+      `UPDATE ai_studio.cake_designs SET order_count = order_count + 1 WHERE id = $1`,
+      [designId]
+    )
+  }
 }
 
 /**
