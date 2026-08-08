@@ -11,6 +11,16 @@ services:
       # JWT and Cookie Secrets
       JWT_SECRET: ${JWT_SECRET}
       COOKIE_SECRET: ${COOKIE_SECRET}
+
+      # Baker Portal — signs baker_session tokens. MUST be a different value from JWT_SECRET and
+      # from OPS's SESSION_SECRET: separation of the customer / OPS / baker identities is enforced
+      # by these keys being distinct, not by cookie or route naming. Without it, every baker login
+      # and account activation fails at the moment the token is minted.
+      BAKER_SESSION_SECRET: ${BAKER_SESSION_SECRET}
+
+      # Proves a caller is the OPS application (service-to-service only, never a user identity).
+      # Must match OPS_SERVICE_KEY in crossfriend-ops, or issuing baker invites returns 401.
+      OPS_SERVICE_KEY: ${OPS_SERVICE_KEY}
       
       # Database Configuration
       DATABASE_TYPE: ${DATABASE_TYPE}

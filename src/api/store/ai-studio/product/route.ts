@@ -2,6 +2,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { evaluatePrice, persistEvaluation } from "../../../../services/pricing/pricing-engine"
 import { evaluateConstraints } from "../../../../services/constraints/constraint-engine"
 import { getAiStudioDbPool } from "../../../../services/ai-image/db"
+import { getCrossFriendChannelId } from "../../../../services/baker-portal/publication"
 
 /**
  * Looks up an existing (design_id, customer_id) → product/variant link. DB is authoritative over
@@ -277,12 +278,17 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
     }
 
     const shippingProfileService = req.scope.resolve("shippingProfileService")
-    const salesChannelService = req.scope.resolve("salesChannelService")
     const defaultProfile = await shippingProfileService.retrieveDefault()
     // Real bug, caught live: this install has sales channels enabled, and a product with none
     // assigned gets rejected the moment it's added to a cart ("must belong to the sales channel on
     // which the cart has been created") — not a theoretical edge case, the very first add-to-cart hit it.
-    const defaultSalesChannel = await salesChannelService.retrieveDefault()
+    //
+    // Deliberately the CROSSFRIEND channel, not salesChannelService.retrieveDefault(). The store's
+    // default is Pranajiva's channel, which was harmless only while CrossFriend carts also
+    // defaulted there. Now that the storefront creates carts on the crossfriend channel — so baker
+    // products can be partitioned and filtered server-side — an AI Studio cake left on Pranajiva's
+    // channel would be rejected at add-to-cart. These two must move together or the Studio breaks.
+    const crossFriendChannelId = await getCrossFriendChannelId(req.scope.resolve("manager"))
 
     const created = await productService.create({
       title,
@@ -293,7 +299,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       thumbnail: body.designImageUrl,
       type: { value: "AI Custom Cake" },
       profile_id: defaultProfile?.id,
-      sales_channels: defaultSalesChannel ? [{ id: defaultSalesChannel.id }] : undefined,
+      sales_channels: [{ id: crossFriendChannelId }],
       metadata,
       variants: [
         {
