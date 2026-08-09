@@ -27,6 +27,10 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       `SELECT b.public_id, b.name, b.slug, b.city, b.state, b.pincode,
               b.bio, b.profile_photo_url, b.is_public, b.blue_tick, b.trust_badge,
               b.google_rating, b.google_review_count,
+              b.contact_person, b.phone, b.whatsapp_number, b.email, b.address,
+              b.website_url, b.avg_turnaround_hours, b.specialty_tags,
+              (SELECT url FROM baker_network.baker_images bi
+                WHERE bi.baker_id = b.id AND bi.purpose = 'banner' LIMIT 1) AS banner_url,
               COUNT(bp.id) FILTER (WHERE bp.publication_state = 'published')::INT AS published_products,
               COUNT(bp.id) FILTER (WHERE bp.publication_state = 'draft')::INT     AS draft_products,
               COUNT(bp.id)::INT                                                    AS total_products
@@ -56,6 +60,18 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         pincode: b.pincode,
         bio: b.bio,
         profilePhotoUrl: b.profile_photo_url,
+        bannerUrl: b.banner_url,
+        // Editable by the baker — see services/baker-portal/profile.ts for the allowlist. Anything
+        // NOT in that list (isPublic, blueTick, trustBadge below) is returned read-only, so the
+        // portal can show their standing without implying they can change it.
+        contactPerson: b.contact_person,
+        phone: b.phone,
+        whatsappNumber: b.whatsapp_number,
+        email: b.email,
+        address: b.address,
+        websiteUrl: b.website_url,
+        avgTurnaroundHours: b.avg_turnaround_hours,
+        specialtyTags: Array.isArray(b.specialty_tags) ? b.specialty_tags : [],
         isPublic: b.is_public,
         blueTick: b.blue_tick,
         trustBadge: b.trust_badge,

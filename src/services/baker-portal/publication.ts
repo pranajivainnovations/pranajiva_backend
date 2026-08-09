@@ -1,5 +1,13 @@
 import type { MedusaRequest } from "@medusajs/medusa"
 
+import { missingForPublish } from "./product-metadata"
+
+/** "a name, a description and at least one photo" — a list a baker reads, not a field dump. */
+function formatList(items: string[]): string {
+  if (items.length === 1) return items[0]
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`
+}
+
 /**
  * Publication — the ONLY code allowed to change what a baker product's visibility looks like.
  *
@@ -143,6 +151,42 @@ export async function applyPublicationState(
     }
 
     const goingLive = next === "published"
+
+    // The completeness gate, checked at publish rather than at creation. A baker is meant to be
+    // able to save a half-finished listing and come back to it — that is what the draft state is
+    // for. What must not happen is an incomplete listing reaching a customer.
+    //
+    // Read inside the transaction and after FOR UPDATE, so it reflects the product as it is right
+    // now rather than as it was when the page was rendered.
+    if (goingLive) {
+      const rows = await tm.query(
+        `SELECT p.title, p.description, p.thumbnail, p.metadata, p.type_id,
+                (SELECT COUNT(*)::INT FROM public.product_variant v WHERE v.product_id = p.id) AS variant_count
+           FROM public.product p WHERE p.id = $1`,
+        [productId]
+      )
+      const p = rows[0]
+      const missing = missingForPublish({
+        title: p?.title,
+        description: p?.description,
+        thumbnail: p?.thumbnail,
+        metadata: p?.metadata,
+        variantCount: p?.variant_count ?? 0,
+      })
+
+      // Products created before the type field existed have no type. Publishing one would put it
+      // on the channel while leaving it invisible to every occasion page and type filter — live
+      // but unfindable, which is worse than blocked.
+      if (!p?.type_id) {
+        missing.push("what kind of product this is")
+      }
+
+      if (missing.length) {
+        throw new Error(
+          `REFUSED:Before this can go live it needs ${formatList(missing)}.`
+        )
+      }
+    }
     const channelId = await getCrossFriendChannelId(tm)
 
     await productService.withTransaction(tm).update(productId, {

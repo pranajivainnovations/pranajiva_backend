@@ -80,12 +80,13 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
   try {
     const body = (req.body ?? {}) as Partial<CreateBakerProductInput>
 
-    // The baker's own slug is denormalised onto product metadata for cheap rendering, so fetch it
-    // alongside. Still only a read cache — authorization never consults it.
+    // The baker's own slug and city are denormalised onto product metadata for cheap rendering and
+    // for the generated SEO description. Still only a read cache — authorization never consults it.
     const db = getBakerNetworkDbPool()
-    const slugRow = await db.query(`SELECT slug FROM baker_network.bakers WHERE id = $1`, [
-      ctx.bakerId,
-    ])
+    const bakerRow = await db.query(
+      `SELECT slug, city FROM baker_network.bakers WHERE id = $1`,
+      [ctx.bakerId]
+    )
 
     const created = await createBakerProduct(
       req,
@@ -94,17 +95,31 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         bakerPublicId: ctx.bakerPublicId,
         bakerUserId: ctx.bakerUserId,
         bakerName: ctx.bakerName,
-        bakerSlug: slugRow.rows[0]?.slug ?? null,
+        bakerSlug: bakerRow.rows[0]?.slug ?? null,
+        bakerCity: bakerRow.rows[0]?.city ?? null,
       },
       {
         name: String(body.name ?? ""),
         categoryId: String(body.categoryId ?? ""),
+        typeValue: String(body.typeValue ?? ""),
         description: body.description ? String(body.description) : undefined,
-        imageUrl: body.imageUrl ? String(body.imageUrl) : undefined,
+        // `imageUrl` (singular) is still accepted so an older client, or a caller written against
+        // the previous shape, keeps working rather than silently losing its photo.
+        imageUrls: Array.isArray(body.imageUrls)
+          ? body.imageUrls.map((u) => String(u))
+          : (body as { imageUrl?: string }).imageUrl
+            ? [String((body as { imageUrl?: string }).imageUrl)]
+            : undefined,
         sizes: Array.isArray(body.sizes)
           ? body.sizes.map((s) => ({ label: String(s?.label ?? ""), price: Number(s?.price) }))
           : [],
         prepHours: body.prepHours != null ? Number(body.prepHours) : undefined,
+        // Read field by field, never spread: buildBakerProductMetadata only emits known keys, and
+        // this keeps the request body from being the shape of what gets stored.
+        contains: body.contains as string[] | undefined,
+        whoIsItFor: body.whoIsItFor as string[] | undefined,
+        highlights: body.highlights as string[] | undefined,
+        careNote: body.careNote ? String(body.careNote) : undefined,
       }
     )
 

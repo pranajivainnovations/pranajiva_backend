@@ -26,6 +26,9 @@
 
 import type { MedusaRequest } from "@medusajs/medusa"
 
+import { getBakerNetworkDbPool } from "../baker-network/db"
+import { buildBakerProductMetadata } from "./product-metadata"
+
 /** The Ready-to-Order tree from CreateCrossFriendCatalogTaxonomy. */
 export const BAKER_CATEGORIES = [
   { id: "pcat_cf_cakes", label: "Cakes" },
@@ -48,11 +51,71 @@ export interface BakerProductSize {
 export interface CreateBakerProductInput {
   name: string
   categoryId: string
+  /**
+   * CrossFriend product type value — `cake`, `gift`, `costume`… From the taxonomy (OPS → Taxonomy).
+   *
+   * This is what places the product on occasion pages and behind `/store?type=`, and it is a
+   * DIFFERENT axis from categoryId: the category is the marketplace shelf, the type is what the
+   * thing is. Products created before this field existed have no type and are invisible to every
+   * type filter, which is why it is required rather than optional.
+   */
+  typeValue: string
   description?: string
-  imageUrl?: string
+  /**
+   * In display order. The FIRST becomes the thumbnail — the image every listing, card and search
+   * result uses — so order is meaningful and is preserved exactly as the baker arranged it.
+   */
+  imageUrls?: string[]
   sizes: BakerProductSize[]
   prepHours?: number
+  /** Ingredients and allergens. Required before publishing — see missingForPublish. */
+  contains?: string[]
+  whoIsItFor?: string[]
+  highlights?: string[]
+  careNote?: string
 }
+
+export interface BakerProductTypeOption {
+  value: string
+  label: string
+  emoji: string | null
+}
+
+/**
+ * The product types a baker may choose from — active CrossFriend types only.
+ *
+ * Read from the taxonomy rather than hardcoded so a type added in OPS is immediately offerable,
+ * and so Pranajiva's types (Herbal Powder, SuperFood) can never appear in a baker's dropdown even
+ * though they sit in the same Medusa table.
+ */
+export async function listBakerProductTypes(): Promise<BakerProductTypeOption[]> {
+  const pool = getBakerNetworkDbPool()
+  const { rows } = await pool.query(
+    `SELECT pt.value, t.label, t.emoji
+       FROM crossfriend.product_types t
+       JOIN public.product_type pt ON pt.id = t.type_id AND pt.deleted_at IS NULL
+      WHERE t.is_active
+      ORDER BY t.display_order, t.label`
+  )
+  return rows.map((r) => ({ value: r.value, label: r.label, emoji: r.emoji }))
+}
+
+/** Resolves a type value to its Medusa id, or null if it is not a CrossFriend type. */
+async function resolveTypeId(value: string): Promise<string | null> {
+  const pool = getBakerNetworkDbPool()
+  const { rows } = await pool.query(
+    `SELECT pt.id
+       FROM crossfriend.product_types t
+       JOIN public.product_type pt ON pt.id = t.type_id AND pt.deleted_at IS NULL
+      WHERE t.is_active AND lower(pt.value) = lower($1)
+      LIMIT 1`,
+    [value]
+  )
+  return rows[0]?.id ?? null
+}
+
+/** A baker can attach this many photos to one product. */
+const MAX_IMAGES = 6
 
 export interface CreatedBakerProduct {
   productId: string
@@ -76,6 +139,12 @@ export function validateBakerProduct(input: CreateBakerProductInput): string | n
 
   if (!BAKER_CATEGORIES.some((c) => c.id === input.categoryId)) {
     return "Choose a category for this product."
+  }
+
+  // Only presence is checked here; whether it is a real CrossFriend type is settled by
+  // resolveTypeId against the taxonomy, so this validator stays synchronous and testable.
+  if (!input.typeValue?.trim()) {
+    return "Choose what kind of product this is."
   }
 
   if (!Array.isArray(input.sizes) || input.sizes.length === 0) {
@@ -105,6 +174,10 @@ export function validateBakerProduct(input: CreateBakerProductInput): string | n
     return "Preparation time should be between 0 and 720 hours."
   }
 
+  if (input.imageUrls && input.imageUrls.length > MAX_IMAGES) {
+    return `You can add up to ${MAX_IMAGES} photos.`
+  }
+
   return null
 }
 
@@ -125,7 +198,14 @@ function buildHandle(name: string, bakerPublicId: string): string {
 
 export async function createBakerProduct(
   req: MedusaRequest,
-  baker: { bakerId: string; bakerPublicId: string; bakerUserId: string; bakerName: string; bakerSlug?: string | null },
+  baker: {
+    bakerId: string
+    bakerPublicId: string
+    bakerUserId: string
+    bakerName: string
+    bakerSlug?: string | null
+    bakerCity?: string | null
+  },
   input: CreateBakerProductInput
 ): Promise<CreatedBakerProduct> {
   const validationError = validateBakerProduct(input)
@@ -139,18 +219,38 @@ export async function createBakerProduct(
 
   const defaultProfile = await shippingProfileService.retrieveDefault()
 
+  const typeId = await resolveTypeId(input.typeValue)
+  if (!typeId) {
+    // A value that is not an active CrossFriend type. Rejecting beats silently creating an untyped
+    // product: that is exactly how every product created before this field ended up invisible to
+    // occasion pages and type filters.
+    throw new Error("That product kind isn't available. Pick one from the list.")
+  }
+
   const name = input.name.trim()
   const handle = await uniqueHandle(manager, buildHandle(name, baker.bakerPublicId))
+  const images = (input.imageUrls ?? []).map((u) => u.trim()).filter(Boolean)
+  const categoryLabel =
+    BAKER_CATEGORIES.find((c) => c.id === input.categoryId)?.label ?? null
 
-  // A read cache for rendering only. Ownership is decided by baker_products and nothing else ever
-  // consults these — see the guard in every /baker/* route.
-  const metadata: Record<string, unknown> = {
-    brand: "crossfriend",
-    baker_id: baker.bakerPublicId,
-    baker_name: baker.bakerName,
-    ...(baker.bakerSlug ? { baker_slug: baker.bakerSlug } : {}),
-    ...(input.prepHours != null ? { prep_hours: input.prepHours } : {}),
-  }
+  // Built, never spread. buildBakerProductMetadata emits a fixed set of keys, so an ops-only field
+  // in the request body (is_addon, kit_eligible) cannot reach the product.
+  const metadata = buildBakerProductMetadata(
+    {
+      bakerPublicId: baker.bakerPublicId,
+      bakerName: baker.bakerName,
+      bakerSlug: baker.bakerSlug,
+      bakerCity: baker.bakerCity,
+      productTitle: name,
+      categoryLabel,
+      prepHours: input.prepHours,
+      contains: input.contains,
+      whoIsItFor: input.whoIsItFor,
+      highlights: input.highlights,
+      careNote: input.careNote,
+    },
+    input.description
+  )
 
   let productId = ""
 
@@ -163,10 +263,16 @@ export async function createBakerProduct(
       status: "proposed",
       discountable: true,
       is_giftcard: false,
-      thumbnail: input.imageUrl || undefined,
-      images: input.imageUrl ? [input.imageUrl] : undefined,
+      // Medusa keeps these separate: `thumbnail` is the single image used in listings and search,
+      // `images` is the gallery on the product page. The baker's first photo serves as both, so
+      // what they arranged in the picker is what customers see everywhere.
+      thumbnail: images[0],
+      images: images.length ? images : undefined,
       profile_id: defaultProfile?.id,
       categories: [{ id: input.categoryId }],
+      // The taxonomy axis: what this thing IS. Category is the marketplace shelf; type is what
+      // occasion pages and /store?type= filter on.
+      type_id: typeId,
       // Deliberately no sales_channels — that is what publication grants.
       metadata,
       // One variant per size the baker offers. Medusa needs an option for variants to differ along,

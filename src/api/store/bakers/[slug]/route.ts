@@ -58,9 +58,15 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
       return res.status(404).json({ error: "Baker not found" })
     }
 
+    // OPS writes purposes 'profile' | 'banner' | 'generic' (see crossfriend-ops/src/lib/s3.ts).
+    // This originally looked for 'cover' and 'logo', which nothing ever writes — so every uploaded
+    // banner was silently ignored and profiles rendered the gradient placeholder instead. The
+    // alternatives are kept as accepted synonyms so a future uploader using either name still works.
     const images: { url: string; purpose: string }[] = row.images || []
-    const cover = images.find((i) => i.purpose === "cover")?.url ?? null
-    const logo = images.find((i) => i.purpose === "logo" || i.purpose === "profile")?.url ?? null
+    const cover =
+      images.find((i) => i.purpose === "banner" || i.purpose === "cover")?.url ?? null
+    const logo =
+      images.find((i) => i.purpose === "profile" || i.purpose === "logo")?.url ?? null
 
     return res.status(200).json({
       baker: {
