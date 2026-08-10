@@ -183,11 +183,20 @@ export async function generateCakeDesigns(
         // image actually depicts — a three tier heart cake looks nothing like a 0.5 kg round one, and
         // the prompt above already bakes them in. Without them a design can be adopted later and
         // priced as something it visibly isn't. See migration 1723300000000.
+        // is_public is set to true HERE rather than left to the column default (which is false).
+        // The image is generated at CrossFriend's expense, and a gallery that starts empty and stays
+        // empty is worth nothing to the next customer looking for ideas — the community showcase only
+        // exists if designs land in it by default. Customers can make any design private afterwards
+        // via /store/ai-studio/designs/:id/visibility, and a private design is still stored and still
+        // visible to the team for moderation; it is only hidden from the public gallery.
+        //
+        // The column default is deliberately left at false: an INSERT that forgets this line should
+        // fail closed, not silently publish someone's cake.
         `INSERT INTO ai_studio.cake_designs
           (id, generation_id, customer_id, image_url, s3_key, image_index,
            prompt, compiled_prompt, style, occasion, flavor, zodiac_sign,
-           provider, provider_model, tags, weight, tiers, shape, status, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'active', NOW(), NOW())`,
+           provider, provider_model, tags, weight, tiers, shape, is_public, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, true, 'active', NOW(), NOW())`,
         [
           designId,
           generationId,

@@ -35,6 +35,33 @@ const DATABASE_URL =
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
+/**
+ * Connection options for every Redis client this app opens.
+ *
+ * Without these the process DIES when a Redis connection drops. The event bus uses BullMQ, which
+ * holds a blocking `bzpopmin` open for minutes at a time with zero bytes on the wire. Anything in
+ * the path that reaps idle connections — a home or office NAT, a load balancer, a flaky
+ * resolver — closes that socket, ioredis raises an error with no handler attached, and Node exits.
+ * Observed locally every 30-90 minutes, and under a few minutes when the network is unstable.
+ *
+ * The production host on AWS talks to the same Redis without a NAT in between and holds its
+ * connections for ~23 hours, so it has never hit this. That is luck, not design: the same drop
+ * would kill it too, and the failure mode is a hard process exit rather than a degraded service.
+ * These options are correct in both places.
+ */
+const REDIS_OPTIONS = {
+  // Send TCP keepalives so a blocking read is never mistaken for a dead connection.
+  keepAlive: 30000,
+  // Reconnect with backoff instead of throwing. Returning a number = "retry after N ms"; never
+  // returning null, because giving up is what kills the process.
+  retryStrategy: (attempt) => Math.min(attempt * 200, 5000),
+  // BullMQ requires this: its blocking commands must not be capped, or they surface an error on
+  // every reconnect instead of resuming.
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+  connectTimeout: 10000,
+};
+
 const plugins = [
   `medusa-fulfillment-manual`,
   `medusa-payment-manual`,
@@ -76,13 +103,16 @@ const modules = {
   eventBus: {
     resolve: "@medusajs/event-bus-redis",
     options: {
-      redisUrl: REDIS_URL
+      redisUrl: REDIS_URL,
+      // This is the one that matters — the event bus holds the long blocking reads.
+      redisOptions: REDIS_OPTIONS,
     }
   },
   cacheService: {
     resolve: "@medusajs/cache-redis",
     options: {
-      redisUrl: REDIS_URL
+      redisUrl: REDIS_URL,
+      redisOptions: REDIS_OPTIONS,
     }
   },
 };
@@ -95,6 +125,9 @@ const projectConfig = {
   database_url: DATABASE_URL,
   admin_cors: ADMIN_CORS,
   redis_url: REDIS_URL,
+  // Medusa opens its own Redis client for sessions from projectConfig — same options, or that one
+  // client keeps the original failure mode and takes the process down on its own.
+  redis_options: REDIS_OPTIONS,
   port: process.env.PORT || 9001,
 };
 

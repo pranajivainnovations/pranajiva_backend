@@ -7,3 +7,11 @@ uploads
 .cache
 dist
 build
+# Deploy artefacts — never part of the build context.
+# deploy.sh writes the saved image tarball here, so without this the NEXT build ships the PREVIOUS
+# image into its own context: 155 MB of pure waste on every rebuild, growing each time.
+*.tgz
+*.tar
+# Never let a private key reach an image layer.
+*.pem
+*.key
