@@ -152,6 +152,33 @@ export async function applyPublicationState(
 
     const goingLive = next === "published"
 
+    // The second half of the visibility rule, checked here so a suspended or non-public bakery
+    // cannot create a violation in the first place. syncBakerProductVisibility repairs existing
+    // products when the flags change; this stops new ones appearing between syncs.
+    //
+    // Read inside the transaction, after the ownership lock, so it reflects the bakery as it is at
+    // this instant rather than when the page was rendered — a baker suspended mid-session must not
+    // be able to publish with a page they loaded a minute earlier.
+    if (goingLive) {
+      const bakerRows = await tm.query(
+        `SELECT is_active, is_public FROM baker_network.bakers WHERE id = $1`,
+        [bakerId]
+      )
+      const baker = bakerRows[0]
+      if (!baker?.is_active) {
+        throw new Error("REFUSED:This bakery account is currently inactive. Contact CrossFriend.")
+      }
+      if (!baker.is_public) {
+        // Distinct from inactive on purpose: this one is normal and temporary — a bakery that has
+        // finished its listings but has not been switched on by ops yet. The message says the work
+        // is saved, because the product does stay published from the baker's side and goes live by
+        // itself the moment ops makes the bakery public.
+        throw new Error(
+          "REFUSED:Your bakery isn't live on CrossFriend yet. Your listing is saved and will go on sale as soon as we switch you on."
+        )
+      }
+    }
+
     // The completeness gate, checked at publish rather than at creation. A baker is meant to be
     // able to save a half-finished listing and come back to it — that is what the draft state is
     // for. What must not happen is an incomplete listing reaching a customer.

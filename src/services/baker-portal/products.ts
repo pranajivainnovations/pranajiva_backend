@@ -27,7 +27,7 @@
 import type { MedusaRequest } from "@medusajs/medusa"
 
 import { getBakerNetworkDbPool } from "../baker-network/db"
-import { buildBakerProductMetadata } from "./product-metadata"
+import { buildBakerProductMetadata, missingForPublish } from "./product-metadata"
 
 /** The Ready-to-Order tree from CreateCrossFriendCatalogTaxonomy. */
 export const BAKER_CATEGORIES = [
@@ -304,6 +304,352 @@ export async function createBakerProduct(
   })
 
   return { productId, handle, publicationState: "draft" }
+}
+
+/**
+ * Everything about a listing a baker may change after creating it.
+ *
+ * Every field optional, and absent means "leave it alone" — distinct from present-and-empty, which
+ * means "clear it". A form that submits only the section being edited must not wipe the rest.
+ *
+ * `handle` is deliberately not here. It is the product's public URL; renaming a cake should not
+ * break a link a customer has already shared, or one Google has already indexed.
+ */
+export interface UpdateBakerProductInput {
+  name?: string
+  description?: string
+  imageUrls?: string[]
+  sizes?: BakerProductSize[]
+  prepHours?: number
+  contains?: string[]
+  whoIsItFor?: string[]
+  highlights?: string[]
+  careNote?: string
+  categoryId?: string
+  typeValue?: string
+}
+
+export interface UpdatedBakerProduct {
+  productId: string
+  publicationState: string
+  /** Set when a live listing was taken off sale because the edit left it incomplete. */
+  unpublishedBecause?: string
+}
+
+/**
+ * Applies a baker's edits to a listing they own.
+ *
+ * ── Why the patch is merged into the current record before validating ───────────────────────────
+ * `validateBakerProduct` speaks the baker's language ("Add at least one size and price") and already
+ * encodes every rule. Reconstructing the full product from what is stored, applying the patch, then
+ * running that same validator means one definition of a valid listing rather than two that drift —
+ * and it makes a partial edit impossible to use as a way around a rule that create enforces.
+ *
+ * ── Why editing can take a live product off sale ────────────────────────────────────────────────
+ * Publishing checks completeness, but nothing stopped an edit from removing the last photo of an
+ * already-published cake, leaving a live listing with no image. Rather than refuse the edit — the
+ * baker plainly wants to change something, and being blocked mid-task with no way forward is worse —
+ * the edit is accepted and the listing drops back to draft with the reason returned, so they can fix
+ * it and publish again.
+ */
+export async function updateBakerProduct(
+  req: MedusaRequest,
+  baker: {
+    bakerId: string
+    bakerPublicId: string
+    bakerName: string
+    bakerSlug?: string | null
+    bakerCity?: string | null
+  },
+  productId: string,
+  input: UpdateBakerProductInput
+): Promise<UpdatedBakerProduct> {
+  const manager = req.scope.resolve("manager")
+  const productService = req.scope.resolve("productService")
+  const productVariantService = req.scope.resolve("productVariantService")
+
+  let result: UpdatedBakerProduct | null = null
+
+  await manager.transaction(async (tm: any) => {
+    const owned = await tm.query(
+      `SELECT publication_state
+         FROM baker_network.baker_products
+        WHERE baker_id = $1 AND medusa_product_id = $2
+        FOR UPDATE`,
+      [baker.bakerId, productId]
+    )
+    // 404 upstream rather than 403 — being refused would confirm the id exists.
+    if (!owned.length) throw new Error("NOT_FOUND")
+    const publicationState = owned[0].publication_state as string
+
+    const existing = await productService.withTransaction(tm).retrieve(productId, {
+      relations: ["variants", "variants.prices", "options", "categories", "images"],
+    })
+
+    const meta = (existing.metadata ?? {}) as Record<string, unknown>
+
+    // The current listing expressed as create-shaped input, so the patch can be laid over it and the
+    // whole thing validated as one.
+    const merged: CreateBakerProductInput = {
+      name: input.name ?? existing.title,
+      categoryId: input.categoryId ?? existing.categories?.[0]?.id ?? "",
+      typeValue: input.typeValue ?? (await typeValueFor(tm, existing.type_id)) ?? "",
+      description: input.description ?? existing.description ?? undefined,
+      imageUrls:
+        input.imageUrls ??
+        (existing.images ?? []).map((image: { url: string }) => image.url).filter(Boolean),
+      sizes:
+        input.sizes ??
+        (existing.variants ?? []).map((variant: any) => ({
+          label: variant.title,
+          // Back to rupees — validation and the baker both think in rupees, Medusa stores paise.
+          // `!p.price_list_id` excludes sale prices: without it, a product on promotion would
+          // prefill the merge with its discounted price and a partial edit would save that as the
+          // permanent one.
+          price: (basePriceOf(variant) ?? 0) / 100,
+        })),
+      prepHours: input.prepHours ?? (meta.prep_hours as number | undefined),
+      contains: input.contains ?? (meta.contains as string[] | undefined),
+      whoIsItFor: input.whoIsItFor ?? (meta.who_is_it_for as string[] | undefined),
+      highlights: input.highlights ?? (meta.highlights as string[] | undefined),
+      careNote: input.careNote ?? (meta.care_note as string | undefined),
+    }
+
+    const validationError = validateBakerProduct(merged)
+    if (validationError) throw new Error(`REFUSED:${validationError}`)
+
+    const typeId = await resolveTypeId(merged.typeValue)
+    if (!typeId) throw new Error("REFUSED:That product kind isn't available. Pick one from the list.")
+
+    const name = merged.name.trim()
+    const images = (merged.imageUrls ?? []).map((u) => u.trim()).filter(Boolean)
+    const categoryLabel = BAKER_CATEGORIES.find((c) => c.id === merged.categoryId)?.label ?? null
+
+    // Rebuilt from the merged record, never spread from the request — an ops-only key in the body
+    // still cannot reach the product, exactly as on create.
+    const metadata = buildBakerProductMetadata(
+      {
+        bakerPublicId: baker.bakerPublicId,
+        bakerName: baker.bakerName,
+        bakerSlug: baker.bakerSlug,
+        bakerCity: baker.bakerCity,
+        productTitle: name,
+        categoryLabel,
+        prepHours: merged.prepHours,
+        contains: merged.contains,
+        whoIsItFor: merged.whoIsItFor,
+        highlights: merged.highlights,
+        careNote: merged.careNote,
+      },
+      merged.description
+    )
+
+    await productService.withTransaction(tm).update(productId, {
+      title: name,
+      description: merged.description?.trim() || undefined,
+      thumbnail: images[0],
+      images,
+      categories: [{ id: merged.categoryId }],
+      type_id: typeId,
+      metadata,
+    })
+
+    await reconcileVariants(tm, productVariantService, existing, merged.sizes)
+
+    // An edit that leaves a live listing incomplete takes it off sale rather than being refused.
+    let unpublishedBecause: string | undefined
+    if (publicationState === "published") {
+      const missing = missingForPublish({
+        title: name,
+        description: merged.description,
+        thumbnail: images[0],
+        metadata,
+        variantCount: merged.sizes.length,
+      })
+      if (missing.length) {
+        unpublishedBecause = `This is no longer ready to be on sale — it needs ${formatMissing(missing)}. We've moved it back to draft.`
+        await unpublishInTransaction(tm, productService, baker.bakerId, productId)
+      }
+    }
+
+    await tm.query(
+      `UPDATE baker_network.baker_products SET updated_at = NOW()
+        WHERE baker_id = $1 AND medusa_product_id = $2`,
+      [baker.bakerId, productId]
+    )
+
+    result = {
+      productId,
+      publicationState: unpublishedBecause ? "draft" : publicationState,
+      unpublishedBecause,
+    }
+  })
+
+  return result!
+}
+
+/** A variant's ordinary INR price in paise, ignoring sale and price-list rows. */
+function basePriceOf(variant: any): number | undefined {
+  return variant.prices?.find((p: any) => p.currency_code === "inr" && !p.price_list_id)?.amount
+}
+
+/** Mirrors publication.ts's list formatting — "a photo, a description and at least one size". */
+function formatMissing(items: string[]): string {
+  if (items.length === 1) return items[0]
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`
+}
+
+/** The type VALUE for a Medusa type id, so an unchanged type survives a partial edit. */
+async function typeValueFor(tm: any, typeId: string | null): Promise<string | null> {
+  if (!typeId) return null
+  const rows = await tm.query(`SELECT value FROM public.product_type WHERE id = $1`, [typeId])
+  return rows[0]?.value ?? null
+}
+
+/**
+ * Brings a product's variants in line with the sizes a baker submitted.
+ *
+ * Matched by LABEL rather than position. A baker who deletes their middle size and saves would
+ * otherwise have every later variant silently renamed and repriced by one place — and because
+ * variant ids are what carts and orders reference, that would quietly rewrite the meaning of any
+ * cart already holding one. Matching on the label means an untouched size keeps its identity.
+ */
+async function reconcileVariants(
+  tm: any,
+  productVariantService: any,
+  existing: any,
+  sizes: BakerProductSize[]
+): Promise<void> {
+  const service = productVariantService.withTransaction(tm)
+  const optionId = existing.options?.[0]?.id
+  const byLabel = new Map<string, any>(
+    (existing.variants ?? []).map((v: any) => [v.title.trim().toLowerCase(), v])
+  )
+  const keep = new Set<string>()
+
+  for (const [index, size] of sizes.entries()) {
+    const label = size.label.trim()
+    const amount = Math.round(size.price * 100)
+    const current = byLabel.get(label.toLowerCase())
+
+    if (current) {
+      keep.add(current.id)
+      const currentAmount = basePriceOf(current)
+      // Only touch what changed — an update rewrites the price rows, and there is no reason to churn
+      // them on a save that edited a photo.
+      if (currentAmount !== amount || current.variant_rank !== index) {
+        await service.update(current.id, {
+          variant_rank: index,
+          prices: [{ currency_code: "inr", amount }],
+        })
+      }
+      continue
+    }
+
+    const created = await service.create(existing.id, {
+      title: label,
+      manage_inventory: false,
+      inventory_quantity: 0,
+      variant_rank: index,
+      options: optionId ? [{ option_id: optionId, value: label }] : [],
+      prices: [{ currency_code: "inr", amount }],
+    })
+    keep.add(created.id)
+  }
+
+  for (const variant of existing.variants ?? []) {
+    if (!keep.has(variant.id)) {
+      await service.delete(variant.id)
+    }
+  }
+}
+
+/**
+ * Takes a product off sale from inside an existing transaction.
+ *
+ * Deliberately not applyPublicationState: that function opens its own transaction and re-checks the
+ * draft→published rules, neither of which applies here. This is the same two-fact projection —
+ * Medusa status and channel membership — written directly.
+ */
+async function unpublishInTransaction(
+  tm: any,
+  productService: any,
+  bakerId: string,
+  productId: string
+): Promise<void> {
+  const { getCrossFriendChannelId } = await import("./publication")
+  const channelId = await getCrossFriendChannelId(tm)
+
+  await productService.withTransaction(tm).update(productId, { status: "proposed" })
+  await tm.query(
+    `DELETE FROM public.product_sales_channel WHERE product_id = $1 AND sales_channel_id = $2`,
+    [productId, channelId]
+  )
+  await tm.query(
+    `UPDATE baker_network.baker_products SET publication_state = 'draft', updated_at = NOW()
+      WHERE baker_id = $1 AND medusa_product_id = $2`,
+    [bakerId, productId]
+  )
+}
+
+export interface DeleteBakerProductResult {
+  productId: string
+}
+
+/**
+ * Permanently deletes a listing the baker owns.
+ *
+ * ── Why orders are an absolute block ────────────────────────────────────────────────────────────
+ * A line item points at a variant, which points at the product. Delete the product and every order
+ * that ever contained it loses the record of what was actually bought — no title, no price, no way
+ * to answer a customer asking what they paid for. That is not recoverable from a backup without
+ * restoring unrelated data along with it, so it is refused outright rather than warned about.
+ *
+ * Archiving remains available and is the right answer for anything real: it takes the listing off
+ * sale and out of the catalogue while the history stays intact. Deletion is for mistakes — a
+ * duplicate, a test listing, something created in the wrong account.
+ */
+export async function deleteBakerProduct(
+  req: MedusaRequest,
+  bakerId: string,
+  productId: string
+): Promise<DeleteBakerProductResult> {
+  const manager = req.scope.resolve("manager")
+  const productService = req.scope.resolve("productService")
+
+  await manager.transaction(async (tm: any) => {
+    const owned = await tm.query(
+      `SELECT 1 FROM baker_network.baker_products
+        WHERE baker_id = $1 AND medusa_product_id = $2
+        FOR UPDATE`,
+      [bakerId, productId]
+    )
+    if (!owned.length) throw new Error("NOT_FOUND")
+
+    const ordered = await tm.query(
+      `SELECT COUNT(*)::INT AS n
+         FROM public.line_item li
+         JOIN public.product_variant v ON v.id = li.variant_id
+        WHERE v.product_id = $1`,
+      [productId]
+    )
+    if ((ordered[0]?.n ?? 0) > 0) {
+      throw new Error(
+        "REFUSED:This product has been ordered, so it can't be deleted — that would erase it from those orders. Archive it instead to take it off sale."
+      )
+    }
+
+    // Ownership row first: if the product delete then fails, the transaction rolls both back. The
+    // reverse order would risk a moment where an existing product has no recorded owner.
+    await tm.query(
+      `DELETE FROM baker_network.baker_products WHERE baker_id = $1 AND medusa_product_id = $2`,
+      [bakerId, productId]
+    )
+    await tm.query(`DELETE FROM public.product_sales_channel WHERE product_id = $1`, [productId])
+    await productService.withTransaction(tm).delete(productId)
+  })
+
+  return { productId }
 }
 
 /**

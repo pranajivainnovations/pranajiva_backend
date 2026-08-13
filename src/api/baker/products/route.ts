@@ -140,3 +140,4 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
 
 /** Exposed so the portal's form renders exactly the categories the backend will accept. */
 export const CATEGORIES = BAKER_CATEGORIES
+
