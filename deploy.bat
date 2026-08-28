@@ -12,4 +12,16 @@ if not exist "%BASH_EXE%" (
 )
 
 "%BASH_EXE%" "%~dp0deploy.sh"
+
+REM deploy.sh appends the outcome, commit and timestamp to DEPLOYED.md. Echo the tail here so a
+REM double-click deploy still shows what was recorded before the window is dismissed - otherwise
+REM the record exists but nobody sees it, which defeats the point of keeping one.
+echo.
+echo ================ last entry in DEPLOYED.md ================
+if exist "%~dp0DEPLOYED.md" (
+  powershell -NoProfile -Command "Get-Content -Path \"%~dp0DEPLOYED.md\" -Tail 9"
+) else (
+  echo No DEPLOYED.md yet - deploy.sh did not reach the recording step.
+)
+echo ==========================================================
 pause

@@ -35,5 +35,25 @@ ENV PORT=9001
 EXPOSE 9001
 
 # Use the production start command
+
+# ── Build provenance ──────────────────────────────────────────────────────────────────────────
+# Declared in the RUNNER stage, deliberately, not the builder. The /api/build route reads these
+# from process.env at request time, so they have to exist in the image that actually runs — a
+# value set in the builder stage is discarded the moment the runner stage starts from a fresh
+# base. (This is the mirror image of the NEXT_PUBLIC_* rule: those must be in the BUILDER stage
+# because the bundler inlines them at compile time. Getting the two confused is what left GA
+# missing from two production builds.)
+#
+# These are readable by anyone who can reach the endpoint. That is an accepted trade: a short
+# commit hash from a private repo is not actionable on its own, and the alternative — a shared
+# token in five more places — is exactly the kind of env plumbing that has already failed here.
+ARG BUILD_COMMIT=unknown
+ARG BUILD_BRANCH=unknown
+ARG BUILD_TREE=unknown
+ARG BUILD_TIME=unknown
+ENV BUILD_COMMIT=$BUILD_COMMIT
+ENV BUILD_BRANCH=$BUILD_BRANCH
+ENV BUILD_TREE=$BUILD_TREE
+ENV BUILD_TIME=$BUILD_TIME
 # CMD ["npm", "run", "start"]
 CMD ["node", "dist/index.js"]
