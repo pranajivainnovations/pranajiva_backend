@@ -59,6 +59,28 @@ services:
       VISION_PROVIDER: ${VISION_PROVIDER}
       VISION_MODEL: ${VISION_MODEL}
 
+      # ── SMS / OTP (MSG91 SendOTP V5) ────────────────────────────────────────
+      # Runtime variables, which is why they belong here rather than as build
+      # args in the Dockerfile: the OTP routes read process.env when a request
+      # arrives, so a value set here takes effect on `docker compose up -d` with
+      # no rebuild. (The mirror of the NEXT_PUBLIC_* rule on the storefront,
+      # where the opposite is true and a value set here would be ignored.)
+      #
+      # Note the failure mode this pairing has: compose substitutes an ABSENT
+      # ${VAR} with an empty string and still sets the variable, so a container
+      # can have MSG91_AUTH_KEY "present" and unusable. Both consumers below
+      # fail closed on empty rather than proceeding, which is what turns that
+      # into a visible 503 instead of a silently broken login.
+      MSG91_AUTH_KEY: ${MSG91_AUTH_KEY}
+
+      # sendotp = MSG91 generates, stores and verifies the code (current).
+      # legacy  = we generate it and MSG91 is only a transport; needs
+      #           OTP_HASH_SECRET. Rollback path, switchable without a deploy.
+      MSG91_OTP_MODE: ${MSG91_OTP_MODE:-sendotp}
+
+      # Only read when MSG91_OTP_MODE=legacy.
+      OTP_HASH_SECRET: ${OTP_HASH_SECRET}
+
 
     restart: unless-stopped
 

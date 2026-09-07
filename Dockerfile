@@ -34,6 +34,29 @@ COPY src/ ./src/
 ENV PORT=9001
 EXPOSE 9001
 
+# ── SMS / OTP (MSG91 SendOTP V5) ──────────────────────────────────────────────
+# Required at RUNTIME, supplied by docker-compose's `environment:` block:
+#
+#   MSG91_AUTH_KEY    credential — sends SMS, spends money
+#   OTP_HASH_SECRET   only when MSG91_OTP_MODE=legacy
+#
+# Neither is declared here, and that is deliberate rather than an oversight.
+# A Dockerfile ENV is baked into the image and readable by anyone who can run
+# `docker history` or `docker inspect` — so a real value here would leak the
+# credential to every host the image is copied to. An EMPTY placeholder would
+# leak nothing but also do nothing, since compose overrides it either way; its
+# only real effect would be to invite someone to fill it in.
+#
+# This is the opposite of the NEXT_PUBLIC_* rule on the storefront, where a
+# value MUST be present at build time because the bundler inlines it. These are
+# read from process.env when a request arrives, so setting them on the server
+# and running `docker compose up -d` is sufficient — no rebuild.
+#
+# MSG91_OTP_MODE is the exception and does get a default: it is not a secret,
+# and baking the intended mode in means a bare `docker run` with no compose file
+# still uses SendOTP rather than silently falling into the legacy path.
+ENV MSG91_OTP_MODE=sendotp
+
 # Use the production start command
 
 # ── Build provenance ──────────────────────────────────────────────────────────────────────────
