@@ -2,6 +2,8 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import { flowBlockedReason, getFlowConfig } from "../../../../../services/messaging/config"
 import { isProviderConfigured, sendOtp } from "../../../../../services/messaging/msg91-otp"
+import { recordSend } from "../../../../../services/messaging/otp-log"
+import { maybePurgeAttemptLog } from "../../../../../services/messaging/purge-throttle"
 import { releaseSend, reserveSend } from "../../../../../services/messaging/rate-limit"
 import { LEGACY_MODE, legacySend } from "../../../../../services/messaging/legacy-flow"
 
@@ -90,6 +92,27 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
           otpLength: config.otpLength,
           otpExpiryMinutes,
         })
+
+    /**
+     * Recorded for both outcomes, and awaited rather than fired and forgotten.
+     *
+     * A failed send is the row support most needs — it is the customer who is sitting there having
+     * received nothing — so losing it to a race with the response would defeat the purpose. The
+     * call cannot throw: every function in otp-log swallows its own errors.
+     */
+    await recordSend({
+      mobile,
+      flowKey,
+      ok: sent.ok,
+      senderHeader: config.template.senderHeader,
+      providerTemplateId: config.template.providerTemplateId,
+      providerRequestId: sent.requestId ?? null,
+      providerError: sent.error ?? null,
+    })
+
+    // Retention sweep, throttled to roughly once a day and deliberately not awaited — a customer
+    // waiting on an OTP should not also wait on a DELETE.
+    void maybePurgeAttemptLog()
 
     if (!sent.ok) {
       // The customer never received a code, so give back the cooldown and daily slot they spent.

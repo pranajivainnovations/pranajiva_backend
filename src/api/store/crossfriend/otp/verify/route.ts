@@ -3,6 +3,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { getFlowConfig } from "../../../../../services/messaging/config"
 import { LEGACY_MODE, legacyVerify } from "../../../../../services/messaging/legacy-flow"
 import { verifyOtp, type OtpFailureKind } from "../../../../../services/messaging/msg91-otp"
+import { recordVerify } from "../../../../../services/messaging/otp-log"
 import {
   attemptsRemaining,
   clearAttempts,
@@ -117,6 +118,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
 
     if (!result.ok) {
       console.error(`[otp/verify] rejected for flow ${flowKey}: ${result.error}`)
+      await recordVerify({ mobile, flowKey, ok: false, failureKind: result.kind ?? null })
       const remaining = await attemptsRemaining(flowKey, mobile, config.maxAttempts)
       const kind = "kind" in result ? (result.kind as OtpFailureKind | undefined) : undefined
       // 502 when the provider itself was unreachable — that is our problem, not a wrong code, and
@@ -126,6 +128,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     }
 
     // Reached only on an explicit MSG91 success.
+    await recordVerify({ mobile, flowKey, ok: true })
     await clearAttempts(flowKey, mobile)
     res.status(200).json({ verified: true })
   } catch (error) {

@@ -19,6 +19,7 @@
  */
 
 import type { FlowConfig } from "./config"
+import type { OtpFailureKind } from "./msg91-otp"
 import { sendSms } from "./msg91"
 import { issueOtp, rollbackIssue, verifyOtp as verifyOtpLocally } from "./otp"
 
@@ -36,9 +37,24 @@ if (LEGACY_MODE) {
   )
 }
 
+/**
+ * Shaped to match Msg91Result's optional fields so the send route can treat either path uniformly.
+ *
+ * requestId is always absent here — under the legacy path MSG91's Flow API is a fire-and-forget
+ * transport with no OTP session to reference — but declaring it keeps the attempt log's call site
+ * free of a branch that would exist only to satisfy the compiler.
+ */
 export interface LegacyResult {
   ok: boolean
   error?: string
+  requestId?: string | null
+  /**
+   * Always absent on this path — the legacy verifier compares locally and has no provider verdict
+   * to classify. Declared so the verify route can read `.kind` without branching on which
+   * implementation produced the result; undefined falls through to the same generic handling a
+   * wrong code gets, which is correct for a local mismatch.
+   */
+  kind?: OtpFailureKind
 }
 
 export async function legacySend(config: FlowConfig, mobile: string): Promise<LegacyResult> {
