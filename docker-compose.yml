@@ -12,6 +12,17 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       COOKIE_SECRET: ${COOKIE_SECRET}
 
+      # ── Browser notifications ───────────────────────────────────────────────
+      # The reminder drain (src/jobs/send-reminders.ts) signs its own pushes, so
+      # the backend needs BOTH halves of the VAPID pair — unlike the storefront,
+      # which only needs the public key so a browser can subscribe.
+      #
+      # Same pair as OPS. Leave unset and reminders are still created, queued and
+      # shown on the Coming up list; only the notification does not go out.
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:ops@crossfriend.in}
+
       # Baker Portal — signs baker_session tokens. MUST be a different value from JWT_SECRET and
       # from OPS's SESSION_SECRET: separation of the customer / OPS / baker identities is enforced
       # by these keys being distinct, not by cookie or route naming. Without it, every baker login
