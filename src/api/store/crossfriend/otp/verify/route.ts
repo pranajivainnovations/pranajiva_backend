@@ -1,5 +1,6 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
+import { issueCustomerSession } from "../../../../../services/crossfriend/customer-session"
 import { getFlowConfig } from "../../../../../services/messaging/config"
 import { LEGACY_MODE, legacyVerify } from "../../../../../services/messaging/legacy-flow"
 import { verifyOtp, type OtpFailureKind } from "../../../../../services/messaging/msg91-otp"
@@ -15,9 +16,19 @@ import {
  *
  * Asks MSG91 whether a submitted code is the one it issued.
  *
- * This route does NOT log the customer in. It answers one question — was this the right code — and
- * the storefront turns a true into a Medusa session, because the session cookie has to be set on
- * the storefront's own origin.
+ * This route verifies the code AND issues the session, returning a Medusa customer token.
+ *
+ * ── Why the session is minted here and not by the storefront ───────────────────────────────────
+ * It used to answer only "was this the right code", and the storefront turned a true into a session
+ * by logging in with a password derived from the mobile number and a shared salt. That made the salt
+ * a master key — anyone holding it could authenticate as any customer straight against
+ * `POST /store/auth`, never requesting a code, never receiving an SMS, never touching the attempt
+ * limits enforced a few lines below. The controls on this route guarded one door; the derived
+ * password was a second one standing open beside it.
+ *
+ * Issuing the token from the same place that verified the code closes that: there is no longer a
+ * password anybody can compute. The storefront's only remaining job is to put the token in a cookie,
+ * and a future mobile app can hold the same token without one.
  *
  * ── Fail-closed ────────────────────────────────────────────────────────────────────────────────
  * `verified: true` is returned from exactly one place in this file, reached only when MSG91
@@ -130,7 +141,24 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     // Reached only on an explicit MSG91 success.
     await recordVerify({ mobile, flowKey, ok: true })
     await clearAttempts(flowKey, mobile)
-    res.status(200).json({ verified: true })
+
+    /**
+     * The session, issued only past the verification above.
+     *
+     * A failure here is deliberately not reported as a bad code — the customer typed the right one,
+     * and telling them otherwise would send them to request another that would fail the same way.
+     */
+    try {
+      const session = await issueCustomerSession(req, mobile)
+      res.status(200).json({
+        verified: true,
+        token: session.token,
+        isNewUser: session.isNewUser,
+      })
+    } catch (error) {
+      console.error("[otp/verify] verified the code but could not issue a session", error)
+      res.status(500).json({ error: "Signed in, but something went wrong. Please try again." })
+    }
   } catch (error) {
     console.error("[otp/verify] failed", error)
     res.status(500).json({ error: "Something went wrong. Please try again." })
