@@ -105,3 +105,27 @@ Do not edit by hand, and do not delete — it is the only record of what is live
 - image:   pranajiva-backend:latest
 - target:  ubuntu@13.62.195.167:/home/ubuntu/pranajiva
 - by:      crossfriend2025
+---
+- when:    2026-09-11 03:42:09 UTC  /  2026-09-11 09:12 IST
+- outcome: FAILED (exit 1)
+- commit:  b1156fa (main)
+- tree:    clean
+- image:   pranajiva-backend:latest
+- target:  ubuntu@13.62.195.167:/home/ubuntu/pranajiva
+- by:      crossfriend2025
+---
+- when:    2026-09-15 09:20:12 UTC  /  2026-09-15 14:50 IST
+- outcome: SUCCESS
+- commit:  a4cc005 (main)
+- tree:    dirty
+- image:   pranajiva-backend:latest
+- target:  ubuntu@13.62.195.167:/home/ubuntu/pranajiva
+- by:      crossfriend2025
+---
+- when:    2026-09-15 15:02:58 UTC  /  2026-09-15 20:32 IST
+- outcome: SUCCESS
+- commit:  4300dce (main)
+- tree:    dirty
+- image:   pranajiva-backend:latest
+- target:  ubuntu@13.62.195.167:/home/ubuntu/pranajiva
+- by:      crossfriend2025
