@@ -337,3 +337,55 @@ export async function reconcile(customerId: string): Promise<{
     agrees: balancePaise + pendingRow === sumRow,
   }
 }
+
+export interface HistoryEntry {
+  id: string
+  entryType: EntryType
+  amountPaise: number
+  createdAt: Date
+  expiresAt: Date | null
+}
+
+/**
+ * What the customer sees of their own ledger.
+ *
+ * ── What is deliberately not here ──────────────────────────────────────────────────────────────
+ * Neither `brand` nor `order_id`. The wallet is one balance shared across two storefronts, so a
+ * history row carrying either would let the wellness site show a line traceable to a cake order, and
+ * the cake site the reverse. That is the one cross-brand rule with nothing to weigh it against: the
+ * balance is shared on purpose, the history is not.
+ *
+ * Leaving the columns out entirely, rather than filtering them per brand, means there is no
+ * parameter a caller can get wrong and no branch that can be inverted by a later edit. Showing
+ * "redeemed on order #1412" for same-brand rows is a genuine nicety and belongs with the rest of the
+ * cross-brand work, where the requesting brand is established rather than asserted by the caller.
+ */
+export async function getHistory(
+  customerId: string,
+  limit = 50
+): Promise<HistoryEntry[]> {
+  /**
+   * Clamped here rather than at the caller, because the caller is an HTTP route and `?limit=abc`
+   * is a thing anyone can type. Math.max(1, NaN) is NaN and Math.min(NaN, 200) is NaN, so a clamp
+   * alone passes the nonsense straight through to Postgres, which rejects the bind and turns a
+   * junk query string into a 500. The finite check is what makes the clamp mean anything.
+   */
+  const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(1, Math.floor(limit)), 200) : 50
+
+  const { rows } = await getWalletDbPool().query(
+    `SELECT id, entry_type, amount_paise, created_at, expires_at
+       FROM wallet.entries
+      WHERE customer_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2`,
+    [customerId, safeLimit]
+  )
+
+  return rows.map((r) => ({
+    id: r.id,
+    entryType: r.entry_type,
+    amountPaise: paise(r.amount_paise),
+    createdAt: r.created_at,
+    expiresAt: r.expires_at,
+  }))
+}
