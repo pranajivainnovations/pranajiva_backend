@@ -14,11 +14,21 @@ import { expireDueCredit } from "../services/wallet/sweeper"
  * least trustworthy part of any system, so nothing that matters may depend on it having run at a
  * particular moment.
  *
- * ── Why daily, and why at three in the morning ─────────────────────────────────────────────────
+ * ── Why daily ──────────────────────────────────────────────────────────────────────────────────
  * The thing being measured is a calendar date, so finer granularity buys nothing: credit expiring
  * today is equally expired at 03:00 and at 23:59, and running every minute would mean a full scan
- * of the ledger fourteen hundred times a day to find nothing. Three in the morning is when the
- * scan's cost is least likely to land beside a customer waiting for a page.
+ * of the ledger fourteen hundred times a day to find nothing.
+ *
+ * ── Which 03:00 ────────────────────────────────────────────────────────────────────────────────
+ * The container's, not India's. Medusa's schedule takes a bare cron expression with no timezone,
+ * so it is read in the process's local time, and no TZ is set on the image — which makes it UTC,
+ * and 03:00 here 08:30 in Delhi.
+ *
+ * That is left alone rather than fudged to 21:30, because an expression that says 3 and means
+ * half past nine the previous evening is the kind of thing that is correct today and wrong the
+ * moment somebody sets TZ. Nothing depends on the hour anyway: this job writes records and is on
+ * no customer's path. If the morning run ever becomes inconvenient, `TZ=Asia/Kolkata` in the
+ * server environment makes this line mean what it says.
  */
 export default async function expireWalletCredit({ container }: ScheduledJobArgs): Promise<void> {
   const logger = container.resolve("logger")
