@@ -152,10 +152,47 @@ export async function getLots(customerId: string, client?: PoolClient): Promise<
   }))
 }
 
-/** What the customer can spend right now, across both brands. */
+/**
+ * Credit taken back that there was nothing left to take it from.
+ *
+ * A movement normally allocates its whole magnitude against specific lots. One case cannot: an
+ * order refunded after its reward was already spent, under the `allow_negative` clawback policy,
+ * reverses the full grant while only part of it — often none — still exists to reclaim. The
+ * unallocated remainder is a debt, and it is simply the difference between what the entry says it
+ * took and what it managed to allocate.
+ *
+ * Under the default `write_off` policy this is always zero, because a reversal there only ever
+ * claims what is actually there. The term costs one indexed query and makes the other policy work
+ * rather than merely be described.
+ */
+export async function getDebt(customerId: string, client?: PoolClient): Promise<number> {
+  const db = client ?? getWalletDbPool()
+
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(ABS(e.amount_paise) - COALESCE(a.allocated, 0)), 0)::bigint AS debt
+       FROM wallet.entries e
+       LEFT JOIN (
+         SELECT consuming_entry_id, SUM(amount_paise)::bigint AS allocated
+           FROM wallet.allocations GROUP BY consuming_entry_id
+       ) a ON a.consuming_entry_id = e.id
+      WHERE e.customer_id = $1
+        AND e.amount_paise < 0
+        AND ABS(e.amount_paise) > COALESCE(a.allocated, 0)`,
+    [customerId]
+  )
+
+  return paise(rows[0].debt)
+}
+
+/**
+ * What the customer can spend right now, across both brands.
+ *
+ * Signed, not floored at zero: if a clawback has left them owing, the wallet must say so rather
+ * than showing a reassuring ₹0 while quietly swallowing the next credit they earn.
+ */
 export async function getBalance(customerId: string, client?: PoolClient): Promise<number> {
-  const lots = await getLots(customerId, client)
-  return lots.reduce((sum, lot) => sum + lot.remainingPaise, 0)
+  const [lots, debt] = await Promise.all([getLots(customerId, client), getDebt(customerId, client)])
+  return lots.reduce((sum, lot) => sum + lot.remainingPaise, 0) - debt
 }
 
 /**
@@ -189,12 +226,28 @@ export function planFromLots(lots: Lot[], requestedPaise: number): RedemptionPla
   }
 }
 
+/**
+ * Caps a request at what the customer actually has, net of any debt.
+ *
+ * Lots and debt are separate quantities: someone can hold an untouched ₹100 grant and owe ₹40 from
+ * a refunded reward, and planning against the lots alone would let them spend ₹100. Netting first is
+ * what makes the debt real rather than decorative.
+ */
+function ceilingFor(lots: Lot[], debt: number, requestedPaise: number): number {
+  const spendable = lots.reduce((sum, lot) => sum + lot.remainingPaise, 0) - debt
+  return Math.min(requestedPaise, Math.max(0, spendable))
+}
+
 export async function planRedemption(
   customerId: string,
   requestedPaise: number,
   client?: PoolClient
 ): Promise<RedemptionPlan> {
-  return planFromLots(await getLots(customerId, client), requestedPaise)
+  const [lots, debt] = await Promise.all([getLots(customerId, client), getDebt(customerId, client)])
+  const capped = ceilingFor(lots, debt, requestedPaise)
+  if (capped <= 0) return { totalPaise: 0, shortfallPaise: requestedPaise, allocations: [] }
+  const plan = planFromLots(lots, capped)
+  return { ...plan, shortfallPaise: requestedPaise - plan.totalPaise }
 }
 
 export interface RedeemResult {
@@ -244,7 +297,14 @@ export async function redeem(params: {
       [params.customerId, GRANT_TYPES]
     )
 
-    const plan = planFromLots(await getLots(params.customerId, client), params.requestedPaise)
+    const lots = await getLots(params.customerId, client)
+    const debt = await getDebt(params.customerId, client)
+    const capped = ceilingFor(lots, debt, params.requestedPaise)
+    const plan =
+      capped > 0
+        ? { ...planFromLots(lots, capped) }
+        : { totalPaise: 0, shortfallPaise: params.requestedPaise, allocations: [] }
+    plan.shortfallPaise = params.requestedPaise - plan.totalPaise
 
     if (plan.totalPaise <= 0) {
       await client.query("ROLLBACK")
