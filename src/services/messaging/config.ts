@@ -96,3 +96,78 @@ export async function getFlowConfig(flowKey: string): Promise<FlowConfig | null>
       : null,
   }
 }
+
+/**
+ * ── Brands, and the login flow each one signs in through ───────────────────────────────────────
+ *
+ * The storefronts think in brands; this table is the only place that knows a brand's login SMS is
+ * carried by a particular flow row. That indirection earns its keep immediately, because the two
+ * flow keys are not symmetrical: CrossFriend's predates the second brand and is named after the
+ * feature that first needed it (`ai_studio_login`) rather than after the brand. Renaming it would
+ * orphan every `otp_attempts` row keyed by it and break the deployed storefront mid-flight, for no
+ * gain — so the asymmetry is contained here instead, where it is one line and visible.
+ *
+ * Adding a brand is this table plus a seeded `message_flows` row. Adding a *second flow* for an
+ * existing brand — an order-confirmation OTP, say — is deliberately not expressible here: this maps
+ * brand to its LOGIN flow, and a route that serves other flows should say so in its own name.
+ */
+export const LOGIN_FLOW_BY_BRAND = {
+  crossfriend: "ai_studio_login",
+  pranajiva: "pranajiva_login",
+} as const
+
+export type Brand = keyof typeof LOGIN_FLOW_BY_BRAND
+
+/**
+ * What a caller that names neither a brand nor a flow gets.
+ *
+ * CrossFriend, because the deployed storefront has always omitted the brand and must keep working
+ * unchanged. A new caller should always be explicit; this default exists for the old one.
+ */
+export const DEFAULT_BRAND: Brand = "crossfriend"
+
+const KNOWN_FLOWS: ReadonlySet<string> = new Set(Object.values(LOGIN_FLOW_BY_BRAND))
+
+export function isBrand(value: unknown): value is Brand {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(LOGIN_FLOW_BY_BRAND, value)
+}
+
+/**
+ * Resolve the flow a sign-in request is for, from either parameter.
+ *
+ * `brand` is what new callers send. `flow` is what the deployed CrossFriend storefront sends and
+ * keeps sending. Both are accepted, and both are checked against a closed set — a caller must never
+ * be able to name an arbitrary flow and drive an unrelated template's SMS.
+ *
+ * Sending BOTH and disagreeing is refused rather than resolved by precedence. Quietly preferring one
+ * would mean a caller that believes it is signing someone in to PranaJiva sends them a CrossFriend
+ * OTP, from the CrossFriend header — a wrong-brand message that looks like a successful send from
+ * every angle except the customer's.
+ *
+ * Returns a flat result rather than throwing: every caller is an HTTP handler that must answer 400
+ * with a customer-safe string, and `error` here is already that string.
+ */
+export function resolveLoginFlow(input: {
+  brand?: unknown
+  flow?: unknown
+}): { flowKey: string; brand: Brand } | { error: string } {
+  const brandGiven = input.brand !== undefined && input.brand !== null && input.brand !== ""
+  const flowGiven = input.flow !== undefined && input.flow !== null && input.flow !== ""
+
+  if (brandGiven && !isBrand(input.brand)) return { error: "Unknown sign-in flow." }
+  if (flowGiven && !KNOWN_FLOWS.has(String(input.flow))) return { error: "Unknown sign-in flow." }
+
+  if (brandGiven && flowGiven && LOGIN_FLOW_BY_BRAND[input.brand as Brand] !== String(input.flow)) {
+    return { error: "Unknown sign-in flow." }
+  }
+
+  const brand: Brand = brandGiven
+    ? (input.brand as Brand)
+    : flowGiven
+      ? (Object.keys(LOGIN_FLOW_BY_BRAND) as Brand[]).find(
+          (b) => LOGIN_FLOW_BY_BRAND[b] === String(input.flow)
+        )!
+      : DEFAULT_BRAND
+
+  return { flowKey: LOGIN_FLOW_BY_BRAND[brand], brand }
+}
