@@ -449,3 +449,126 @@ export async function getHistory(
     expiresAt: r.expires_at,
   }))
 }
+
+export interface GrantInput {
+  customerId: string
+  entryType: (typeof GRANT_TYPES)[number]
+  amountPaise: number
+  brand: Brand
+  /** Where it was earned. Required for anything a pincode budget counts. */
+  pincode?: string | null
+  /** Salted digest of the delivery address, for the one-grant-per-address rule. Never the address. */
+  addressHash?: string | null
+  /** The order that caused it. The unique index makes a second grant of the same type impossible. */
+  orderId?: string | null
+  configVersion?: number | null
+  expiresAt?: Date | null
+  reason?: string | null
+  createdBy?: string | null
+}
+
+/**
+ * Put credit into a wallet.
+ *
+ * ── Why this is a bare primitive with no policy in it ──────────────────────────────────────────
+ * Whether a customer should be granted anything is a question about limiters, eligibility, windows
+ * and configuration versions, and it is answered above this line. What happens here is only the
+ * writing, so there is exactly one place that creates credit and it is small enough to read in a
+ * sitting. Every rule that decides an amount lives where it can be changed without touching the
+ * thing that moves money.
+ *
+ * ── Duplicate grants are declined, not raised ──────────────────────────────────────────────────
+ * The partial unique index on (customer_id, entry_type, order_id) is what stops a webhook and an
+ * operator both marking one order delivered from paying the reward twice. ON CONFLICT DO NOTHING
+ * turns that collision into an empty result rather than an exception, and this returns null — the
+ * caller wanted the customer to have the grant, and they already do.
+ *
+ * Declining rather than raising matters beyond tidiness: inside a caller's transaction a unique
+ * violation aborts the whole transaction, so catching the error would leave the caller unable to do
+ * anything afterwards. This way a duplicate costs one no-op statement and nothing else.
+ */
+export async function grantCredit(input: GrantInput): Promise<{ id: string } | null> {
+  if (!Number.isSafeInteger(input.amountPaise) || input.amountPaise <= 0) {
+    throw new Error(`[wallet] cannot grant ${input.amountPaise}`)
+  }
+
+  const { rows } = await getWalletDbPool().query(
+    `INSERT INTO wallet.entries
+       (customer_id, entry_type, amount_paise, brand, pincode, order_id,
+        config_version, expires_at, reason, created_by, address_hash)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT DO NOTHING
+     RETURNING id`,
+    [
+      input.customerId,
+      input.entryType,
+      input.amountPaise,
+      input.brand,
+      input.pincode ?? null,
+      input.orderId ?? null,
+      input.configVersion ?? null,
+      input.expiresAt ?? null,
+      input.reason ?? null,
+      input.createdBy ?? null,
+      input.addressHash ?? null,
+    ]
+  )
+
+  if (!rows[0]) {
+    console.warn(
+      `[wallet] ${input.entryType} already granted to ${input.customerId} for order ${input.orderId}`
+    )
+    return null
+  }
+
+  return { id: rows[0].id }
+}
+
+/** How many grants of one type a customer has ever had on a brand. */
+export async function countGrants(
+  customerId: string,
+  brand: Brand,
+  entryType: (typeof GRANT_TYPES)[number]
+): Promise<number> {
+  const { rows } = await getWalletDbPool().query(
+    `SELECT COUNT(*)::int AS n FROM wallet.entries
+      WHERE customer_id = $1 AND brand = $2 AND entry_type = $3`,
+    [customerId, brand, entryType]
+  )
+  return rows[0].n
+}
+
+/** The first grant of a type a customer received, which is where a promise window starts. */
+export async function firstGrantAt(
+  customerId: string,
+  brand: Brand,
+  entryType: (typeof GRANT_TYPES)[number]
+): Promise<Date | null> {
+  const { rows } = await getWalletDbPool().query(
+    `SELECT created_at FROM wallet.entries
+      WHERE customer_id = $1 AND brand = $2 AND entry_type = $3
+      ORDER BY created_at ASC LIMIT 1`,
+    [customerId, brand, entryType]
+  )
+  return rows[0]?.created_at ?? null
+}
+
+/**
+ * How many grants of one type have gone to a delivery address on this brand.
+ *
+ * Counted across customers, which is the entire point: one mobile is already one customer, so the
+ * attack this answers is many mobiles delivering to one flat.
+ */
+export async function countGrantsToAddress(
+  brand: Brand,
+  entryType: (typeof GRANT_TYPES)[number],
+  addressHash: string
+): Promise<number> {
+  const { rows } = await getWalletDbPool().query(
+    `SELECT COUNT(DISTINCT customer_id)::int AS n
+       FROM wallet.entries
+      WHERE brand = $1 AND entry_type = $2 AND address_hash = $3`,
+    [brand, entryType, addressHash]
+  )
+  return rows[0].n
+}

@@ -1,5 +1,6 @@
 import { getWalletDbPool } from "./db"
 import type { Brand } from "./ledger"
+import { getActivation, getRepeatRate, type ActivationReport, type RepeatReport } from "./cohorts"
 import { evaluateMechanic, headroomFrom } from "./limiters"
 import type { Mechanic } from "./reward-config"
 
@@ -58,6 +59,9 @@ export interface PincodeOutcomes {
     outstandingPaise: number
     customers: number
   }
+  /** The measurement the whole plan is judged on, and its baseline. */
+  repeat: RepeatReport
+  activation: ActivationReport
   /** Named so nobody mistakes an absence for a zero. */
   unavailable: string[]
 }
@@ -180,10 +184,17 @@ export async function getPincodeOutcomes(
     [brand, pincode]
   )
 
+  const [repeat, activation] = await Promise.all([
+    getRepeatRate({ brand, pincode }),
+    getActivation({}),
+  ])
+
   return {
     brand,
     pincode,
     mechanics,
+    repeat,
+    activation,
     totals: {
       issuedPaise: mechanics.reduce((s, m) => s + m.issuedPaise, 0),
       redeemedPaise: mechanics.reduce((s, m) => s + m.redeemedPaise, 0),
@@ -200,9 +211,10 @@ export async function getPincodeOutcomes(
      * which is the reading that makes a cheap offer look like a good one.
      */
     unavailable: [
-      "Contribution margin after incentives — needs order values, which arrive with the first orders.",
-      "90-day repeat rate — the figure the plan is actually judged on. Same dependency.",
-      "Activation rate — signups per pincode are not recorded; credit reached is the nearest thing here.",
+      "Contribution margin after incentives — needs order values. Medusa computes an order's total " +
+        "from its line items rather than storing one, so this arrives with the first orders.",
+      "Activation per pincode — a customer's pincode comes from their first order, so everyone who " +
+        "has one has ordered. Brand-wide activation is reported instead.",
     ],
   }
 }
