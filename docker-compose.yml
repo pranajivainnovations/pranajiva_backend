@@ -70,6 +70,8 @@ services:
       VISION_PROVIDER: ${VISION_PROVIDER}
       VISION_MODEL: ${VISION_MODEL}
 
+      ADDRESS_HASH_SALT: ${ADDRESS_HASH_SALT}
+
       # ── SMS / OTP (MSG91 SendOTP V5) ────────────────────────────────────────
       # Runtime variables, which is why they belong here rather than as build
       # args in the Dockerfile: the OTP routes read process.env when a request
