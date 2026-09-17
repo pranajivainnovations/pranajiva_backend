@@ -278,9 +278,22 @@ export async function redeem(params: {
   customerId: string
   requestedPaise: number
   brand: Brand
-  orderId: string
+  /**
+   * What the credit is being spent on — an order, or the cart that has not become one yet.
+   *
+   * Exactly one. Checkout debits against a cart, because the customer sees the amount they pay drop
+   * before any order exists and the wallet has to have moved by then. The row is never promoted to
+   * carry the order id afterwards: the ledger refuses UPDATE, and a Medusa order records the cart it
+   * came from, so the link is a join rather than a step that has to run.
+   */
+  orderId?: string | null
+  cartId?: string | null
   configVersion?: number | null
 }): Promise<RedeemResult> {
+  if (!params.orderId === !params.cartId) {
+    throw new Error("[wallet] a redemption needs exactly one of orderId or cartId")
+  }
+
   const pool = getWalletDbPool()
   const client = await pool.connect()
 
@@ -313,10 +326,17 @@ export async function redeem(params: {
 
     const { rows } = await client.query(
       `INSERT INTO wallet.entries
-         (customer_id, entry_type, amount_paise, brand, config_version, order_id)
-       VALUES ($1, 'redemption', $2, $3, $4, $5)
+         (customer_id, entry_type, amount_paise, brand, config_version, order_id, cart_id)
+       VALUES ($1, 'redemption', $2, $3, $4, $5, $6)
        RETURNING id`,
-      [params.customerId, -plan.totalPaise, params.brand, params.configVersion ?? null, params.orderId]
+      [
+        params.customerId,
+        -plan.totalPaise,
+        params.brand,
+        params.configVersion ?? null,
+        params.orderId ?? null,
+        params.cartId ?? null,
+      ]
     )
     const entryId: string = rows[0].id
 

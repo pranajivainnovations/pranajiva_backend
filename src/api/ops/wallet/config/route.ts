@@ -96,6 +96,8 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     params?: Record<string, number | boolean>
     note?: string
     opsUserId?: string | null
+    scopeMode?: "all" | "selected" | null
+    scopePincodes?: string[] | null
   }
 
   const brand = body.brand as Brand
@@ -131,6 +133,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     endsAt: body.endsAt ? new Date(body.endsAt) : null,
     maxGrants: body.maxGrants ?? null,
     budgetPaise: body.budgetPaise ?? null,
+    /**
+     * Where it runs.
+     *
+     * Passed through as undefined when the screen did not send one, which putVersion reads as
+     * "unchanged" and carries the previous version's scope forward — so an operator editing a rate
+     * does not have to restate the pincode list, and cannot accidentally widen an offer by leaving a
+     * field alone. Only a screen that actually shows the scope should send one.
+     */
+    scopeMode: body.scopeMode === undefined ? undefined : (body.scopeMode ?? null),
+    scopePincodes: body.scopePincodes === undefined ? undefined : (body.scopePincodes ?? null),
     params: body.params ?? {},
     note: body.note.trim(),
     createdBy: body.opsUserId ?? null,

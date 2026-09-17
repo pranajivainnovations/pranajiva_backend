@@ -39,6 +39,7 @@ export type BlockReason =
   | "globally_stopped"
   | "not_configured"
   | "switched_off"
+  | "not_in_scope"
   | "not_ready"
   | "not_started"
   | "ended"
@@ -172,6 +173,21 @@ export async function evaluateMechanic(params: {
    * does not.
    */
   honouringPromise?: boolean
+  /**
+   * Delivery already happened, so the readiness bar has nothing left to protect.
+   *
+   * Readiness exists to stop us paying to acquire customers in a pincode nothing can be delivered
+   * from. A reward earned on an order that was delivered a week ago is the opposite case: that
+   * pincode demonstrably delivered, and the money is owed for something that already went right.
+   * Blocking it because a baker has since unpublished a product would withhold a commission on a
+   * cake that arrived, for a reason that is about future orders.
+   *
+   * Deliberately narrow, and deliberately not `honouringPromise`, which steps past the operator
+   * switch, the budget and the end date as well. Those must keep applying: stopping referral has to
+   * stop referral payments, and a budget that has bound has to bind. This skips one check, the only
+   * one that is asking a question already answered.
+   */
+  supplyAlreadyProven?: boolean
 }): Promise<Verdict> {
   const at = params.at ?? new Date()
 
@@ -243,6 +259,34 @@ export async function evaluateMechanic(params: {
   }
 
   /**
+   * And then: is this one of the pincodes it was switched on for?
+   *
+   * ── Why this is not the same question as "is it enabled" ─────────────────────────────────────
+   * A brand-level offer used to be on everywhere the moment it was on anywhere, and the only trace of
+   * that decision was its absence. Now the brand row names where it runs, and a pincode that is not
+   * named is not served — which is a different sentence from "somebody stopped it here", and is
+   * reported as one so an operator looking at a quiet pincode can tell the two apart.
+   *
+   * ── Why an explicit pincode row still wins ───────────────────────────────────────────────────
+   * The check runs only when the enablement came from the brand. A pincode-level version exists
+   * because somebody created it, and creating one is the act of deciding what happens there — so a
+   * pilot can be switched on in one pincode without touching the list, and switched off in another
+   * without editing the list either. The list is the answer for pincodes that have said nothing.
+   */
+  if (params.pincode && config.source.isEnabled === "brand" && config.scopeMode === "selected") {
+    const scope = config.scopePincodes ?? []
+    if (!scope.includes(params.pincode)) {
+      return blocked(
+        "not_in_scope",
+        scope.length === 0
+          ? "This reward is switched on but has no pincodes selected, so it runs nowhere."
+          : `This reward runs in ${scope.join(", ")}, and ${params.pincode} is not one of them.`,
+        "stopped"
+      )
+    }
+  }
+
+  /**
    * The readiness bar, checked after the operator switch and before the limiters.
    *
    * Paying to acquire customers in a pincode nothing can be delivered from buys negative word of
@@ -256,7 +300,7 @@ export async function evaluateMechanic(params: {
    * Brand-level evaluation with no pincode skips it. That is a report or a preview asking about the
    * mechanic in general, not an order about to be placed somewhere.
    */
-  if (params.pincode) {
+  if (params.pincode && !params.supplyAlreadyProven) {
     const bakers = await readyBakerCount(params.pincode)
     if (bakers < READINESS_BAKERS) {
       return blocked(

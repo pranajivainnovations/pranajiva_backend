@@ -111,6 +111,19 @@ export function isRefused(decision: JoiningCashDecision): decision is JoiningCas
   return decision.eligible === false
 }
 
+/**
+ * The same guard for the outcome rather than the decision.
+ *
+ * Needed for the same reason and by the caller rather than by this file: a subscriber that logs why a
+ * grant did not happen has to read `reason`, and without strictNullChecks the compiler still sees both
+ * shapes after an `if (outcome.granted) return`.
+ */
+export function isNotGranted(
+  outcome: JoiningCashOutcome
+): outcome is Extract<JoiningCashOutcome, { granted: false }> {
+  return outcome.granted === false
+}
+
 export async function evaluateJoiningCash(order: OrderFacts): Promise<JoiningCashDecision> {
   const at = order.at ?? new Date()
   const already = await countGrants(order.customerId, order.brand, "promo_grant")

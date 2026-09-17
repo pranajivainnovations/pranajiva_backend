@@ -92,6 +92,15 @@ export const FIELDS: Record<Mechanic, FieldSpec[]> = {
       help: "How many of the referee's delivered orders earn the referrer anything." },
     { key: "hold_days", label: "Hold after delivery", unit: "days", required: true, min: 0, max: 60,
       help: "Days past delivery before credit is granted, so a return does not leave a reward already spent." },
+    { key: "max_per_address", label: "Rewards per delivery address", unit: "count",
+      required: false, min: 1, max: 20,
+      help: "How many referral rewards may be earned from deliveries to one address. The cheap attack is a ring of accounts ordering to the same flat; this is what bounds it. Raise it for a hostel or an office, knowing what it permits." },
+    { key: "monthly_cap_paise", label: "Most one referrer can earn a month", unit: "paise",
+      required: false, min: 1,
+      help: "Stops a single account accumulating faster than it can plausibly be worth. Leave empty for no monthly limit." },
+    { key: "annual_cap_paise", label: "Most one referrer can earn a year", unit: "paise",
+      required: false, min: 1,
+      help: "The outer bound on one person's referral earnings. Around ₹1,000 is the spec's working figure. Leave empty for no annual limit." },
   ],
 
   cashback: [
@@ -116,6 +125,9 @@ export interface RewardConfig {
   maxGrants: number | null
   budgetPaise: number | null
   params: Record<string, number | boolean>
+  /** Brand-level only: 'all' every pincode, 'selected' only those listed. Null on a pincode row. */
+  scopeMode: ScopeMode | null
+  scopePincodes: string[] | null
   note: string | null
   createdBy: string | null
   createdAt: Date
@@ -146,6 +158,8 @@ function rowToConfig(r: Record<string, any>): RewardConfig {
     endsAt: r.ends_at,
     maxGrants: r.max_grants === null ? null : Number(r.max_grants),
     budgetPaise: r.budget_paise === null ? null : Number(r.budget_paise),
+    scopeMode: (r.scope_mode ?? null) as ScopeMode | null,
+    scopePincodes: r.scope_pincodes ?? null,
     params: r.params ?? {},
     note: r.note,
     createdBy: r.created_by,
@@ -222,6 +236,17 @@ export async function getEffectiveConfig(
     params: { ...(brandRow?.params ?? {}) },
     source: {},
   }
+
+  /**
+   * The scope always comes from the brand row, never from the spread above.
+   *
+   * When there is no brand row the base IS the pincode row, and a spread would have carried that
+   * row's null through as though a scope had been considered and left empty. Stating it means the
+   * absence of a brand row reads as "no list to be in" rather than "not in the list", which are
+   * opposite answers for the pincode asking.
+   */
+  merged.scopeMode = brandRow?.scopeMode ?? null
+  merged.scopePincodes = brandRow?.scopePincodes ?? null
 
   for (const key of Object.keys(merged.params)) merged.source[key] = "brand"
   for (const field of OVERRIDABLE) merged.source[field] = brandRow ? "brand" : "pincode"
@@ -339,11 +364,35 @@ export function validateParams(
   return problems
 }
 
+export type ScopeMode = "all" | "selected"
+
+/**
+ * A pincode list, tidied.
+ *
+ * Trimmed, de-duplicated and sorted, because the list is shown back to an operator and compared
+ * between versions in the audit trail — "201016, 201014" and "201014, 201016 " are the same decision
+ * and should not read as a change somebody made.
+ */
+function normalisePincodes(list: string[] | null | undefined): string[] | null {
+  if (list === null || list === undefined) return null
+  return [...new Set(list.map((p) => String(p).trim()).filter(Boolean))].sort()
+}
+
 export interface NewVersionInput {
   brand: Brand
   pincode?: string | null
   mechanic: Mechanic
   isEnabled: boolean
+  /**
+   * Where a brand-level offer runs. Ignored at pincode scope, where the row IS the scope.
+   *
+   * Omitting it on a serving mechanic's brand row carries the previous version's scope forward, so
+   * stopping an offer does not lose the list of pincodes it ran in — the same reasoning as the bare
+   * stop below. A scope has to be chosen once; it does not have to be restated to switch something
+   * off and on again.
+   */
+  scopeMode?: ScopeMode | null
+  scopePincodes?: string[] | null
   startsAt?: Date | null
   endsAt?: Date | null
   maxGrants?: number | null
@@ -387,7 +436,7 @@ export async function putVersion(input: NewVersionInput): Promise<RewardConfig> 
      * is one.
      */
     const { rows: previous } = await client.query(
-      `SELECT params, starts_at, ends_at, max_grants, budget_paise
+      `SELECT params, starts_at, ends_at, max_grants, budget_paise, scope_mode, scope_pincodes
          FROM wallet.reward_config
         WHERE brand = $1 AND mechanic = $2 AND pincode IS NOT DISTINCT FROM $3
         ORDER BY version DESC LIMIT 1`,
@@ -439,6 +488,47 @@ export async function putVersion(input: NewVersionInput): Promise<RewardConfig> 
     const problems = validateParams(input.mechanic, params, {
       requireAll: pincode === null && input.isEnabled,
     })
+
+    /**
+     * Where it runs.
+     *
+     * Only brand-level rows carry a scope — a pincode row is already about exactly one pincode, and
+     * the database refuses a scope on one. Economics is not an offer and runs nowhere in particular.
+     *
+     * An omitted scope inherits the previous version's, so switching an offer off and on again keeps
+     * the pincodes somebody chose. The one thing that is refused is switching a serving mechanic ON
+     * for the first time without saying where: that used to mean "everywhere", and defaulting to
+     * everywhere is the behaviour this whole change exists to remove.
+     */
+    const servesSomewhere = pincode === null && input.mechanic !== "economics"
+    let scopeMode: ScopeMode | null = null
+    let scopePincodes: string[] | null = null
+
+    if (servesSomewhere) {
+      scopeMode =
+        input.scopeMode ?? ((priorVersion?.scope_mode ?? null) as ScopeMode | null)
+      scopePincodes =
+        input.scopeMode !== undefined && input.scopeMode !== null
+          ? normalisePincodes(input.scopePincodes)
+          : input.scopePincodes !== undefined
+            ? normalisePincodes(input.scopePincodes)
+            : ((priorVersion?.scope_pincodes ?? null) as string[] | null)
+
+      if (!scopeMode) {
+        problems.push(
+          "Choose where this runs — a list of pincodes, or every pincode. There is no longer a " +
+            "default, because the old default was every pincode and nothing said so."
+        )
+      }
+      if (scopeMode === "selected" && scopePincodes === null) {
+        problems.push("Selected scope needs a list of pincodes, even an empty one.")
+      }
+      for (const p of scopePincodes ?? []) {
+        if (!/^[1-9][0-9]{5}$/.test(p)) problems.push(`"${p}" is not a pincode.`)
+      }
+      if (scopeMode === "all") scopePincodes = null
+    }
+
     if (problems.length) throw new ConfigValidationError(problems)
 
     /**
@@ -465,8 +555,9 @@ export async function putVersion(input: NewVersionInput): Promise<RewardConfig> 
     const { rows } = await client.query(
       `INSERT INTO wallet.reward_config
          (brand, pincode, mechanic, version, effective_from, is_enabled,
-          starts_at, ends_at, max_grants, budget_paise, params, note, created_by)
-       VALUES ($1,$2,$3,$4,COALESCE($5, NOW()),$6,$7,$8,$9,$10,$11,$12,$13)
+          starts_at, ends_at, max_grants, budget_paise, params, note, created_by,
+          scope_mode, scope_pincodes)
+       VALUES ($1,$2,$3,$4,COALESCE($5, NOW()),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING *`,
       [
         input.brand,
@@ -482,6 +573,8 @@ export async function putVersion(input: NewVersionInput): Promise<RewardConfig> 
         JSON.stringify(params),
         input.note ?? null,
         input.createdBy ?? null,
+        scopeMode,
+        scopePincodes,
       ]
     )
 

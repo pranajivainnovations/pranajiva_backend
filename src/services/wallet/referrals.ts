@@ -1,5 +1,6 @@
 import { getWalletDbPool } from "./db"
 import type { Brand } from "./ledger"
+import { resolveCode } from "./referral-codes"
 
 /**
  * Who referred whom.
@@ -177,4 +178,61 @@ export async function getReferralChain(
     [customerId, maxDepth]
   )
   return rows.map((r) => r.customer_id)
+}
+
+/**
+ * Someone arriving with a code — the whole of GS-5.1's write path.
+ *
+ * ── Why "has never ordered" is the eligibility rule ────────────────────────────────────────────
+ * A referral is supposed to bring somebody who was not going to buy. Without a rule, any customer
+ * can be attributed at any time, and the profitable move becomes finding people who have already
+ * decided — asking a friend mid-checkout to paste your code — which pays out on an order that was
+ * always going to happen. Restricting it to customers with no orders removes that entirely.
+ *
+ * It is deliberately not "attribution only in the first minutes of a new account", which was the
+ * other candidate and is worse in the case that matters: somebody who signed up months ago, never
+ * bought anything, and has now been talked into it by a friend is precisely what a referral
+ * programme is for, and an account-age window would refuse them. The order is the event that says
+ * the customer was already ours; the signup is not.
+ *
+ * ── Everything else is delegated ───────────────────────────────────────────────────────────────
+ * Self-referral, re-attribution and cycles are attributeReferral's, under its lock. Repeating those
+ * checks here would mean two places to keep correct and a window between them.
+ */
+export type ClaimResult =
+  | { status: "attributed"; referrerCustomerId: string }
+  /** No such code. Mistyped, or a code that was revoked after the link was shared. */
+  | { status: "unknown_code" }
+  /** Not a new customer any more. */
+  | { status: "already_ordered" }
+  | { status: "already_attributed"; referrerCustomerId: string }
+  | { status: "self_referral" }
+  | { status: "would_create_cycle"; throughDepth: number }
+  | { status: "unknown_customer" }
+
+export async function claimReferralCode(params: {
+  customerId: string
+  code: string
+  brand: Brand
+}): Promise<ClaimResult> {
+  const referrerCustomerId = await resolveCode(params.code)
+  if (!referrerCustomerId) return { status: "unknown_code" }
+
+  const { rows } = await getWalletDbPool().query(
+    `SELECT EXISTS (
+       SELECT 1 FROM public."order" WHERE customer_id = $1
+     ) AS ordered`,
+    [params.customerId]
+  )
+  if (rows[0].ordered) return { status: "already_ordered" }
+
+  const result = await attributeReferral({
+    customerId: params.customerId,
+    referrerCustomerId,
+    brand: params.brand,
+  })
+
+  return result.status === "attributed"
+    ? { status: "attributed", referrerCustomerId }
+    : result
 }

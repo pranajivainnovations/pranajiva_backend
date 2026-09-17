@@ -257,6 +257,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
         title,
         description: body.compiledPrompt || "AI-designed custom cake",
         thumbnail: body.designImageUrl,
+        /* Also set here, so a cake created before campaigns could reach custom cakes is corrected
+           the next time its owner touches the design, rather than staying excluded for ever. */
+        discountable: true,
         metadata,
       })
       await productVariantService.update(targetVariantId, {
@@ -294,7 +297,15 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       title,
       description: body.compiledPrompt || "AI-designed custom cake",
       status: "draft", // never shows in public catalog/search — every order carries a customer's own personalization
-      discountable: false,
+      /**
+       * Discountable, deliberately.
+       *
+       * It was false, on the reasoning that a bespoke price should not be marked down. That turned
+       * out to exclude custom cakes from every campaign the business runs — the flagship product
+       * being the one thing a promotion could never touch. A percentage campaign now applies to the
+       * full configured price, add-ons included, which is worth knowing when setting one.
+       */
+      discountable: true,
       is_giftcard: false,
       thumbnail: body.designImageUrl,
       type: { value: "AI Custom Cake" },
