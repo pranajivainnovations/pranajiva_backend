@@ -280,6 +280,105 @@ export async function moveBakerOrder(input: {
   }
 }
 
+/**
+ * Moves an order for ops — the backstop when a baker does not.
+ *
+ * ── Why this exists separately from moveBakerOrder ─────────────────────────────────────────────
+ * A baker is an independent business, and the delivery mark is the one signal the whole reward chain
+ * hangs off: referral payouts are owed from delivery, so "when does a referrer get paid" was, until
+ * this existed, a question about how diligent somebody else felt like being that week. Ops has to be
+ * able to say an order was delivered, because ops is the party that actually knows.
+ *
+ * ── Why the baker's transition rules do not apply ──────────────────────────────────────────────
+ * They exist so a baker's own screen cannot skip a step they did not do, and so `delivered` and
+ * `rejected` are terminal to a tap. The file already says that undoing either "goes through ops
+ * rather than a button that is easy to hit" — this is that route. Ops may set any status from any
+ * status, including reopening a terminal one, because every case where that is needed is one where a
+ * person has looked at the order and knows more than the state machine does.
+ *
+ * ── What is preserved regardless ───────────────────────────────────────────────────────────────
+ * The first time each step happened. The upsert below COALESCEs every timestamp, so an ops
+ * correction never rewrites when a baker actually accepted or delivered something — which keeps "how
+ * long did this take" honest, and keeps a referral payout anchored to the real delivery rather than
+ * to the moment somebody tidied up the record.
+ *
+ * ── Why membership is still checked ────────────────────────────────────────────────────────────
+ * Not as a permission — ops may act on any order — but because a baker_orders row for a baker with
+ * nothing in the order is a row that means nothing, and would show that baker an order they never
+ * had. The id in the request is only as trustworthy as whatever built the page.
+ */
+export async function moveOrderAsOps(input: {
+  bakerId: string
+  orderId: string
+  next: BakerOrderStatus
+  opsUserId: string
+  rejectionReason?: string | null
+}): Promise<MoveResult> {
+  const db = getBakerNetworkDbPool()
+  const client = await db.connect()
+
+  try {
+    await client.query("BEGIN")
+
+    const owns = await client.query(
+      `SELECT 1
+         FROM public.line_item li
+         ${LINE_ITEM_JOINS}
+        WHERE li.order_id = $2
+          AND ${BAKER_OF_LINE_ITEM} = $1
+        LIMIT 1`,
+      [input.bakerId, input.orderId]
+    )
+    if (!owns.rowCount) throw new Error("NOT_FOUND")
+
+    await client.query(
+      `SELECT status FROM baker_network.baker_orders
+        WHERE order_id = $1 AND baker_id = $2
+        FOR UPDATE`,
+      [input.orderId, input.bakerId]
+    )
+
+    await client.query(
+      `INSERT INTO baker_network.baker_orders
+         (order_id, baker_id, status,
+          accepted_at, baking_at, ready_at, delivered_at, rejected_at, rejection_reason,
+          updated_by_baker_user, updated_by_ops_user)
+       VALUES ($1, $2, $3::varchar,
+               CASE WHEN $3::varchar = 'accepted'  THEN NOW() END,
+               CASE WHEN $3::varchar = 'baking'    THEN NOW() END,
+               CASE WHEN $3::varchar = 'ready'     THEN NOW() END,
+               CASE WHEN $3::varchar = 'delivered' THEN NOW() END,
+               CASE WHEN $3::varchar = 'rejected'  THEN NOW() END,
+               $4, NULL, $5)
+       ON CONFLICT (order_id, baker_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         accepted_at  = COALESCE(baker_network.baker_orders.accepted_at,  EXCLUDED.accepted_at),
+         baking_at    = COALESCE(baker_network.baker_orders.baking_at,    EXCLUDED.baking_at),
+         ready_at     = COALESCE(baker_network.baker_orders.ready_at,     EXCLUDED.ready_at),
+         delivered_at = COALESCE(baker_network.baker_orders.delivered_at, EXCLUDED.delivered_at),
+         rejected_at  = COALESCE(baker_network.baker_orders.rejected_at,  EXCLUDED.rejected_at),
+         rejection_reason = COALESCE(EXCLUDED.rejection_reason, baker_network.baker_orders.rejection_reason),
+         updated_by_ops_user = EXCLUDED.updated_by_ops_user,
+         updated_at = NOW()`,
+      [
+        input.orderId,
+        input.bakerId,
+        input.next,
+        input.rejectionReason ?? null,
+        input.opsUserId,
+      ]
+    )
+
+    await client.query("COMMIT")
+    return { orderId: input.orderId, status: input.next }
+  } catch (error) {
+    await client.query("ROLLBACK")
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 export interface OpsOrderRow {
   orderId: string
   displayId: number
