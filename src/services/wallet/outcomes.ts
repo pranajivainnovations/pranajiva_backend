@@ -67,12 +67,18 @@ export interface PincodeOutcomes {
 }
 
 const ENTRY_TYPE: Record<Exclude<Mechanic, "economics">, string> = {
+  signup_bonus: "signup_bonus",
   joining_cash: "promo_grant",
   referral: "referral_earn",
   cashback: "cashback_earn",
 }
 
-const MECHANICS: Exclude<Mechanic, "economics">[] = ["joining_cash", "referral", "cashback"]
+const MECHANICS: Exclude<Mechanic, "economics">[] = [
+  "signup_bonus",
+  "joining_cash",
+  "referral",
+  "cashback",
+]
 
 /**
  * How credit issued in one pincode has been used.

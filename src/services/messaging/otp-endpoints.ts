@@ -2,6 +2,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import { issueCustomerSession } from "../crossfriend/customer-session"
 import { flowBlockedReason, getFlowConfig, resolveLoginFlow } from "./config"
+import { issueSignupBonus } from "../wallet/signup-bonus"
 import { LEGACY_MODE, legacySend, legacyVerify } from "./legacy-flow"
 import { isProviderConfigured, sendOtp, verifyOtp, type OtpFailureKind } from "./msg91-otp"
 import { recordSend, recordVerify } from "./otp-log"
@@ -211,7 +212,15 @@ function messageFor(kind: OtpFailureKind | undefined, remaining: number): string
  * the accepted cost of MSG91 owning the code, and it is why the error below says "right now".
  */
 export async function handleOtpVerify(req: MedusaRequest, res: MedusaResponse): Promise<void> {
-  const body = (req.body ?? {}) as { mobile?: string; otp?: string; flow?: string; brand?: string }
+  const body = (req.body ?? {}) as {
+    mobile?: string
+    otp?: string
+    flow?: string
+    brand?: string
+    /* What the visitor typed into the storefront before signing in, if anything. Declared, never
+       verified — see issueSignupBonus for what it is and is not allowed to decide. */
+    pincode?: string | null
+  }
   const mobile = String(body.mobile ?? "").trim()
   const otp = String(body.otp ?? "").trim()
 
@@ -301,6 +310,43 @@ export async function handleOtpVerify(req: MedusaRequest, res: MedusaResponse): 
      */
     try {
       const session = await issueCustomerSession(req, mobile)
+
+      /**
+       * A joining bonus, if a campaign is running and this is a new account.
+       *
+       * ── Why a failure here cannot fail the sign-in ─────────────────────────────────────────────
+       * The session already exists by this point. A customer locked out of their own account because
+       * a promotional grant threw would be a catastrophic trade for a feature whose entire purpose is
+       * to make them feel welcome. Everything is caught; a missed bonus can be granted by hand, and
+       * the grant path is safe to run again because a unique index makes the second one a no-op.
+       *
+       * ── Why every sign-in and not only a new account ───────────────────────────────────────────
+       * It was new accounts only, which quietly made the offer unclaimable for the people most likely
+       * to miss it: somebody who skipped the pincode prompt, signed in with no area, and told us where
+       * they were afterwards. The rule is "no pincode, no bonus YET" — so every sign-in is another
+       * chance to settle it, and so is the moment they set a pincode while signed in.
+       *
+       * Safe to run on every sign-in because the unique index grants once. The fortieth sign-in writes
+       * nothing and costs one indexed read.
+       */
+      {
+        try {
+          const outcome = await issueSignupBonus({
+            customerId: session.customerId,
+            brand: resolved.brand,
+            pincode: typeof body.pincode === "string" ? body.pincode : null,
+          })
+          if (outcome.granted) {
+            console.log(
+              `[otp/verify] joining bonus of ₹${(outcome.amountPaise / 100).toFixed(2)} ` +
+                `to ${session.customerId}`
+            )
+          }
+        } catch (error) {
+          console.error("[otp/verify] joining bonus failed", error)
+        }
+      }
+
       res.status(200).json({
         verified: true,
         token: session.token,

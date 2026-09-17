@@ -28,7 +28,15 @@ import { getWalletDbPool } from "./db"
  */
 
 /** Grants only. Movements consume these; they are never consumed themselves. */
-const GRANT_TYPES = ["promo_grant", "referral_earn", "cashback_earn", "manual_grant"] as const
+const GRANT_TYPES = [
+  "promo_grant",
+  /* Paid for joining rather than for ordering — see the signup-bonus migration for why it is
+     its own type instead of a third promo_grant. */
+  "signup_bonus",
+  "referral_earn",
+  "cashback_earn",
+  "manual_grant",
+] as const
 
 /**
  * Credit we gave away, as opposed to credit the customer did something to earn.

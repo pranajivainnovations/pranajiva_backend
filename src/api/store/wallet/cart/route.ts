@@ -50,6 +50,20 @@ function redeemableOf(cart: any): number {
   return Math.max(0, subtotal - discount)
 }
 
+/**
+ * What the customer would pay with no credit applied — the figure at the bottom of their screen.
+ *
+ * ── Why the gift card already on the cart is added back ────────────────────────────────────────
+ * Once credit is applied, Medusa's total is net of it, and quoting the cap against that number would
+ * measure the cap against a figure the credit itself had already reduced. Adding it back asks the
+ * question that was actually meant: what would this order cost if they paid for all of it.
+ */
+function payableOf(cart: any): number {
+  const total = Number(cart.total ?? 0)
+  const giftCards = Number(cart.gift_card_total ?? 0)
+  return Math.max(0, total + giftCards)
+}
+
 /** The wallet's own gift card on this cart, if it has one. */
 function walletCardOn(cart: any): any | null {
   return (cart.gift_cards ?? []).find((g: any) => g?.metadata?.source === WALLET_GIFT_CARD) ?? null
@@ -89,6 +103,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
       cartId,
       brand: brandOf(cart.sales_channel?.name),
       pincode: cart.shipping_address?.postal_code ?? null,
+      payablePaise: payableOf(cart),
       redeemablePaise: redeemableOf(cart),
     })
 
@@ -177,6 +192,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
       cartId,
       brand: brandOf(cart.sales_channel?.name),
       pincode: cart.shipping_address?.postal_code ?? null,
+      payablePaise: payableOf(cart),
       redeemablePaise: redeemableOf(cart),
     })
 

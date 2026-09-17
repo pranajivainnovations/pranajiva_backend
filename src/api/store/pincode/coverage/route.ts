@@ -40,6 +40,28 @@ import { getBakerNetworkDbPool } from "../../../../services/baker-network/db"
  * 200: always, for any well-formed pincode. Absence of coverage is an answer, not an error.
  * 400: not six digits.
  */
+
+/**
+ * One tally per pincode per day per tier, upserted.
+ *
+ * Nothing here identifies anybody — a pincode and a date cannot be turned back into a person — which
+ * is what makes it safe to keep indefinitely. The identified version, for visitors who explicitly
+ * asked to be told when we arrive, is the waitlist and stays there.
+ */
+async function recordInterest(pincode: string, tier: string): Promise<void> {
+  try {
+    await getBakerNetworkDbPool().query(
+      `INSERT INTO crossfriend.pincode_interest (pincode, day, tier, asks)
+       VALUES ($1, CURRENT_DATE, $2, 1)
+       ON CONFLICT (pincode, day, tier)
+       DO UPDATE SET asks = crossfriend.pincode_interest.asks + 1`,
+      [pincode, tier]
+    )
+  } catch (error) {
+    console.error("[pincode/coverage] could not record interest", error)
+  }
+}
+
 export async function GET(req: MedusaRequest, res: MedusaResponse) {
   const pincode = String(req.query.pincode || "").trim()
   const bakerSlug = String(req.query.baker || "").trim().toLowerCase()
@@ -142,6 +164,20 @@ export async function GET(req: MedusaRequest, res: MedusaResponse) {
         }
       }
     }
+
+    /**
+     * The ask itself is worth keeping, whatever the answer was.
+     *
+     * Every visitor is now asked for a pincode on arrival, which makes this the only place that
+     * learns where people want cakes BEFORE a baker exists there — the question that decides which
+     * pincode opens next. It was previously answered and discarded, so demand could only ever be
+     * read from the places already being served.
+     *
+     * Deliberately fire-and-forget and never awaited into the response: a visitor waiting on a
+     * statistics write is a visitor waiting for nothing they asked for, and a failed tally must never
+     * turn a working coverage check into an error.
+     */
+    void recordInterest(pincode, serviceStatus === "enabled" && bakerCount > 0 ? "deliver" : area ? "design_only" : "unknown")
 
     return res.status(200).json({
       pincode,

@@ -62,7 +62,18 @@ export interface CartCreditQuote {
   /** What could be applied to this cart right now. */
   applicablePaise: number
   balancePaise: number
-  /** What the platform will let credit cover — goods after discount, never delivery or tax. */
+  /**
+   * What the customer would pay if they used no credit — the figure on their screen, after any
+   * coupon and including delivery and tax. The cap is a percentage of this.
+   */
+  payablePaise: number
+  /**
+   * What the platform will let credit cover: goods after discount, never delivery or tax.
+   *
+   * A hard ceiling rather than a policy — Medusa applies a gift card against the discounted item
+   * total and refuses anything above it, so offering more would produce a checkout error rather than
+   * a bigger discount.
+   */
   redeemablePaise: number
   /** What is already applied, if the customer has applied it. */
   appliedPaise: number
@@ -89,6 +100,9 @@ export async function quoteCartCredit(params: {
   cartId: string
   brand: Brand
   pincode: string | null
+  /** What the customer would pay with no credit applied. The cap is measured against this. */
+  payablePaise: number
+  /** The platform's own ceiling on what a gift card may cover. */
   redeemablePaise: number
 }): Promise<CartCreditQuote> {
   const [balancePaise, economics, applied] = await Promise.all([
@@ -97,8 +111,22 @@ export async function quoteCartCredit(params: {
     getCartCredit(params.cartId),
   ])
 
+  /**
+   * The cap is a share of what the customer pays, not of what the items cost.
+   *
+   * ── Why this changed ─────────────────────────────────────────────────────────────────────────
+   * It used to be measured against the discounted item total, which is a number nobody sees. An
+   * order of several items with a coupon on it has an item total, a discount, a delivery charge and
+   * a tax line, and the only figure the customer recognises is the one at the bottom. "Up to 15% of
+   * your order" has to mean 15% of that, or the percentage means something different on every basket
+   * and cannot be explained to anybody.
+   *
+   * The platform ceiling below is separate and still applies: Medusa will not let a gift card cover
+   * delivery or tax whatever the cap says, so at a high cap the ceiling is what binds, and the
+   * customer is told that rather than offered credit checkout would refuse.
+   */
   const capBps = Number(economics?.params.promo_redemption_cap_bps ?? 10000)
-  const capPaise = Math.floor((params.redeemablePaise * capBps) / 10000)
+  const capPaise = Math.floor((params.payablePaise * capBps) / 10000)
   const ceiling = Math.max(0, Math.min(balancePaise, params.redeemablePaise, capPaise))
 
   /**
@@ -119,6 +147,7 @@ export async function quoteCartCredit(params: {
   return {
     applicablePaise: ceiling,
     balancePaise,
+    payablePaise: params.payablePaise,
     redeemablePaise: params.redeemablePaise,
     appliedPaise: applied?.amountPaise ?? 0,
     limitedBy,
@@ -151,6 +180,7 @@ export async function applyCartCredit(params: {
   cartId: string
   brand: Brand
   pincode: string | null
+  payablePaise: number
   redeemablePaise: number
   requestedPaise?: number
 }): Promise<ApplyResult> {

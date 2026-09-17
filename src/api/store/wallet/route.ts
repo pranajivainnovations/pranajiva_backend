@@ -41,8 +41,27 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
 
     const balancePaise = lots.reduce((sum, lot) => sum + lot.remainingPaise, 0)
 
+    /**
+     * Where the balance came from, as remaining amounts rather than totals ever earned.
+     *
+     * A customer looking at ₹300 wants to know which parts of it are what — the welcome bonus, the
+     * credit from a friend's order, the apology from support — because those are different promises
+     * with different expiry dates. Summing the grants would answer a different question: what they
+     * have been given in total, most of which they may already have spent.
+     *
+     * Lots are what the resolver spends from, so this is the same arithmetic the checkout does, not a
+     * second opinion that could disagree with it.
+     */
+    const bySource = new Map<string, number>()
+    for (const lot of lots) {
+      bySource.set(lot.entryType, (bySource.get(lot.entryType) ?? 0) + lot.remainingPaise)
+    }
+
     res.status(200).json({
       balancePaise,
+      sources: [...bySource.entries()]
+        .map(([type, amountPaise]) => ({ type, amountPaise }))
+        .sort((a, b) => b.amountPaise - a.amountPaise),
 
       /**
        * Only the credit that actually expires, soonest first.

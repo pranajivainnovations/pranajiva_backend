@@ -17,7 +17,12 @@ import type { Brand } from "./ledger"
  * strictly below a gross margin — a comparison that must not turn on the seventeenth decimal place.
  */
 
-export type Mechanic = "economics" | "joining_cash" | "referral" | "cashback"
+export type Mechanic =
+  | "economics"
+  | "signup_bonus"
+  | "joining_cash"
+  | "referral"
+  | "cashback"
 
 export interface FieldSpec {
   key: string
@@ -65,6 +70,13 @@ export const FIELDS: Record<Mechanic, FieldSpec[]> = {
       min: 1,
       help: "The order this brand's guardrails and previews are measured against. Not a limit on anything — change it and no customer is affected, but every warning about stacking and every 'you net ₹X' line moves with it.",
     },
+  ],
+
+  signup_bonus: [
+    { key: "amount_paise", label: "Amount on joining", unit: "paise", required: true, min: 1,
+      help: "Credited the moment somebody creates an account, before they have ordered anything. Unlike joining cash this is not earned, so what bounds it is the budget, the grant cap and the expiry rather than the cost of a cake." },
+    { key: "expiry_days", label: "Expires in", unit: "days", required: true, min: 1, max: 365,
+      help: "Days from joining. The whole purpose of this credit is to turn a signup into a first order, and credit with no deadline does not do that — it just sits on the books." },
   ],
 
   joining_cash: [
@@ -499,6 +511,12 @@ export async function putVersion(input: NewVersionInput): Promise<RewardConfig> 
      * the pincodes somebody chose. The one thing that is refused is switching a serving mechanic ON
      * for the first time without saying where: that used to mean "everywhere", and defaulting to
      * everywhere is the behaviour this whole change exists to remove.
+     */
+    /**
+     * Which mechanics have to say where they run.
+     *
+     * Economics is the brand's numbers and runs nowhere in particular; everything else, the welcome
+     * bonus included, has to say where it runs.
      */
     const servesSomewhere = pincode === null && input.mechanic !== "economics"
     let scopeMode: ScopeMode | null = null

@@ -72,6 +72,7 @@ export interface Verdict {
 }
 
 const ENTRY_TYPE: Record<Exclude<Mechanic, "economics">, string> = {
+  signup_bonus: "signup_bonus",
   joining_cash: "promo_grant",
   referral: "referral_earn",
   cashback: "cashback_earn",
@@ -96,7 +97,17 @@ async function getUsage(
   brand: Brand,
   pincode: string | null,
   mechanic: Exclude<Mechanic, "economics">,
-  since: Date | null
+  since: Date | null,
+  /**
+   * Count every pincode, rather than the one named.
+   *
+   * Needed because "no pincode" and "all pincodes" are different questions and the obvious way to
+   * ask the second is to pass null for the first — which quietly asks the wrong one. `IS NOT
+   * DISTINCT FROM NULL` matches only the rows whose pincode is itself null, so a brand-wide budget
+   * asked for that way counts the handful of grants where the area was unknown and ignores all the
+   * rest. A grant cap of four let a fifth through before this existed.
+   */
+  acrossAllPincodes = false
 ): Promise<Usage> {
   const { rows } = await getWalletDbPool().query(
     `SELECT COUNT(*)::int AS grants,
@@ -104,9 +115,9 @@ async function getUsage(
        FROM wallet.entries
       WHERE brand = $1
         AND entry_type = $2
-        AND pincode IS NOT DISTINCT FROM $3
+        AND ($5::boolean OR pincode IS NOT DISTINCT FROM $3)
         AND ($4::timestamptz IS NULL OR created_at >= $4)`,
-    [brand, ENTRY_TYPE[mechanic], pincode, since]
+    [brand, ENTRY_TYPE[mechanic], pincode, since, acrossAllPincodes]
   )
 
   return {
@@ -222,7 +233,29 @@ export async function evaluateMechanic(params: {
     }
   }
 
-  const usage = await getUsage(params.brand, params.pincode, params.mechanic, windowStart(config))
+  /**
+   * Usage is counted at the level the budget is set at.
+   *
+   * Every other mechanic is configured per pincode, so its budget and grant cap describe that
+   * pincode and the count must be narrowed to it. The welcome bonus cannot be — it pays when somebody
+   * joins, before they have an area — so its budget is a single brand-wide pot, and counting it per
+   * pincode would let a ₹50,000 campaign be spent ₹50,000 at a time in every pincode somebody
+   * happened to type. Caught by a test where a cap of four grants let a fifth through.
+   */
+  /**
+   * Counted across every pincode when the configuration is brand-wide.
+   *
+   * A budget set on the brand row with a scope of "every pincode" is one pot, and narrowing the count
+   * to the pincode being asked about would let it be spent in full in each of them. A scope of
+   * selected pincodes is still counted per pincode, because that is the level the override is set at.
+   */
+  const usage = await getUsage(
+    params.brand,
+    params.pincode,
+    params.mechanic,
+    windowStart(config),
+    config.scopeMode === "all" && config.source.isEnabled === "brand"
+  )
   const blocked = (reason: BlockReason, explanation: string, kind: "stopped" | "paused"): Verdict => ({
     allowed: false,
     kind,
