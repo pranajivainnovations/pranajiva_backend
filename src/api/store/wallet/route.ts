@@ -1,6 +1,8 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import { getHistory, getLots } from "../../../services/wallet/ledger"
+import type { Brand } from "../../../services/wallet/ledger"
+import { getGrantLadder } from "../../../services/wallet/grant-ladder"
 
 /**
  * GET /store/wallet — the signed-in customer's own balance and history.
@@ -34,9 +36,23 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
   }
 
   try {
-    const [lots, entries] = await Promise.all([
+    /**
+     * The pincode is whatever the storefront has been told, passed through as a query parameter.
+     *
+     * It decides only what the screen may promise, never what anything pays: a customer who types a
+     * neighbouring pincode to see a better offer sees a better offer and still earns on the address
+     * their order is delivered to. Every payout reads that address instead — see the note in
+     * signup-bonus for the same reasoning.
+     */
+    const pincode = typeof req.query.pincode === "string" ? req.query.pincode : null
+    const brand: Brand = req.query.brand === "pranajiva" ? "pranajiva" : "crossfriend"
+
+    const [lots, entries, ladder] = await Promise.all([
       getLots(customerId),
       getHistory(customerId, Number(req.query.limit ?? 50)),
+      /* Never fatal. A wallet that renders without its offer strip is a smaller page; a wallet that
+         500s because the offer could not be evaluated is a customer who cannot see their money. */
+      getGrantLadder({ customerId, brand, pincode }).catch(() => null),
     ])
 
     const balancePaise = lots.reduce((sum, lot) => sum + lot.remainingPaise, 0)
@@ -59,6 +75,16 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
 
     res.status(200).json({
       balancePaise,
+
+      /**
+       * What is still to be earned, and on what terms.
+       *
+       * Read from the configuration that governs the payout rather than written into the storefront,
+       * because all three of its numbers move: the amounts are settings, the offer runs in named
+       * pincodes, and there is a minimum order value. See getGrantLadder.
+       */
+      ladder,
+
       sources: [...bySource.entries()]
         .map(([type, amountPaise]) => ({ type, amountPaise }))
         .sort((a, b) => b.amountPaise - a.amountPaise),
