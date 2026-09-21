@@ -1,6 +1,7 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { generateCakeDesigns } from "../../../../services/ai-image/ai-generation-service"
 import type { GenerationRequest } from "../../../../services/ai-image/types"
+import { getAllowance } from "../../../../services/ai-studio/allowance"
 
 /**
  * POST /store/ai-studio/generate
@@ -150,23 +151,54 @@ export async function POST(req: MedusaRequest, res: MedusaResponse) {
       referenceUploadId: hasReferenceImage ? referenceUploadId : undefined,
     }
 
-    // ── 4. Generate ────────────────────────────────────────────────────────────
+    // ── 4. Allowance ───────────────────────────────────────────────────────────
+    /**
+     * Checked here, before the provider is called, because after it the money is already spent.
+     *
+     * This replaces a limit that lived in the storefront's React state and reset on refresh — which
+     * at roughly ₹5 of compute per generation meant the Studio had no limit at all. There is no
+     * deduction step to match it: the allowance is derived by counting the generations table, so
+     * the row this request is about to create IS the decrement. Nothing can be spent without
+     * leaving the record that it was.
+     */
+    const allowance = await getAllowance(customerId)
+
+    if (!allowance.allowed) {
+      return res.status(403).json({
+        success: false,
+        error:
+          "You have used all your design generations. Talk to us and we can add more to your account.",
+        code: "NO_GENERATIONS_LEFT",
+        generationsUsed: allowance.used,
+        generationsTotal: allowance.total,
+        generationsRemaining: 0,
+      })
+    }
+
     // TODO: Add rate limiting check here (Phase 3)
-    // TODO: Add credit check here (Phase 2)
     // TODO: Add generation lock here (Phase 3)
 
     const result = await generateCakeDesigns(generationRequest)
 
-    // TODO: Deduct credit here (Phase 2)
     // TODO: Release generation lock here (Phase 3)
 
     // ── 5. Return response ─────────────────────────────────────────────────────
+    /**
+     * Re-read rather than subtracted. A failed generation may or may not have consumed an attempt
+     * depending on how the operator set charge_failed, and the arithmetic for that belongs in one
+     * place — so the number the customer is shown is read back from the same source that will
+     * refuse the next request, and the screen cannot drift from the rule.
+     */
+    const after = await getAllowance(customerId).catch(() => null)
+
     return res.status(200).json({
       success: true,
       generationId: result.generationId,
       designs: result.designs,
       creditsRemaining: result.creditsRemaining,
       horoscopeQuote: result.horoscopeQuote,
+      generationsRemaining: after?.remaining ?? null,
+      generationsTotal: after?.total ?? null,
     })
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error"

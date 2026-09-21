@@ -5,7 +5,7 @@ import {
   OPS_SERVICE_KEY_HEADER,
 } from "../../../../services/baker-portal/ops-service-auth"
 import { grantCredit, type Brand } from "../../../../services/wallet/ledger"
-import { getWalletDbPool } from "../../../../services/wallet/db"
+import { findCustomerByMobile } from "../../../../services/ops/find-customer"
 
 /**
  * POST /ops/wallet/grant — credit given by hand.
@@ -73,29 +73,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     let customerId = body.customerId ?? null
 
     if (!customerId && body.mobile) {
-      const digits = String(body.mobile).replace(/\D/g, "").slice(-10)
-      const { rows } = await getWalletDbPool().query(
-        `SELECT id FROM public.customer
-          WHERE deleted_at IS NULL
-            AND (phone = $1 OR email LIKE $2)
-          ORDER BY created_at
-          LIMIT 2`,
-        [digits, `${digits}@%`]
-      )
-
-      if (rows.length === 0) {
-        res.status(404).json({ error: "No customer has signed in with that number." })
+      const found = await findCustomerByMobile(body.mobile)
+      if (!found.customerId) {
+        res.status(found.status).json({ error: found.error })
         return
       }
-      /* Refused rather than guessed. Granting money to the wrong one of two matches is not a
-         mistake that announces itself. */
-      if (rows.length > 1) {
-        res.status(409).json({
-          error: "That number matches more than one customer. Grant by customer id instead.",
-        })
-        return
-      }
-      customerId = rows[0].id
+      customerId = found.customerId
     }
 
     if (!customerId) {

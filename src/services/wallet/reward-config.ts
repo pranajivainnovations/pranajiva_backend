@@ -110,16 +110,21 @@ export const FIELDS: Record<Mechanic, FieldSpec[]> = {
    * rather than a count. A number that only exists in somebody's head cannot warn anyone.
    */
   studio: [
-    { key: "free_anonymous", label: "Free generations, signed out", unit: "count", required: true, min: 0, max: 50,
-      help: "What a visitor gets before we ask who they are. This is what makes the landing page work without a login wall — and it is also the only generation nobody can be held to, since there is no mobile behind it. 0 keeps the current behaviour, where signing in comes first." },
-    { key: "free_signed_in", label: "Free generations after signing in", unit: "count", required: true, min: 0, max: 200,
-      help: "What the signup itself buys, on top of the allowance above. Worth more than the compute at almost any sensible number — but multiply it by the unit cost below before setting it, because that product is what every signup costs you whether or not they ever order." },
-    { key: "price_paise", label: "Price per extra generation", unit: "paise", required: true, min: 0,
-      help: "Charged at the point of use once the free allowances are gone, and never taken from the wallet — credit given for marketing must not be spendable on compute. Set it above the unit cost or each extra generation loses money on purpose." },
+    /* No signed-out field. Generation requires a login — decided deliberately, and the route
+       enforces it with a 401 — so a control for an allowance nobody can ever hold would be a
+       setting that silently does nothing. If anonymous generation is ever wanted it needs an
+       unauthenticated route and a device identity first, and this field can come back then. */
+    { key: "free_signed_in", label: "Free generations per customer", unit: "count", required: true, min: 0, max: 200,
+      help: "What a signed-in customer gets before the Studio refuses them, enforced on the server. Multiply it by the unit cost below before changing it: that product is what every signup costs you whether or not they ever order — at 10 free and ₹5 each, ₹50 a head. One account at a time is topped up from Studio Usage instead, which leaves a reason and a name; this field moves it for everybody at once." },
+    /* Recorded, not acted on. Kept in the catalogue so a price can be agreed and versioned before
+       anything is built to collect it — but nothing reads this field, so the label must not imply
+       a customer is being charged. */
+    { key: "price_paise", label: "Price per extra generation (not charged yet)", unit: "paise", required: true, min: 0,
+      help: "NOT IN USE. No customer is charged for a generation today — when the free allowance runs out they are told to talk to us, and ops adds more by hand. This field records what a generation would cost if that ever changes; leave it at 0 until there is something to collect it. When it is built, the charge will be taken at the point of use and never from the wallet, because credit given for marketing must not be spendable on compute." },
     { key: "unit_cost_paise", label: "What one generation costs us", unit: "paise", required: true, min: 0,
-      help: "The provider's bill for one generated design. Not a lever — it is here so the price can be checked against it and so a free allowance can be shown as rupees rather than a count." },
-    { key: "refund_on_order", label: "Refund paid generations when they order", unit: "boolean", required: true,
-      help: "On, the charge only ever lands on somebody who did not buy, which is the whole point of charging. Off, it becomes a revenue line — and a reason for your most serious customer to stop designing." },
+      help: "The provider's bill for one generated design — about ₹5 today. Not a lever and not a charge: nothing is billed to a customer from this. It is here so a free allowance can be read as rupees rather than a count, which is what makes ten free generations legible as ₹50 of compute per signup." },
+    { key: "refund_on_order", label: "Refund paid generations when they order (not in use)", unit: "boolean", required: true,
+      help: "NOT IN USE, and it cannot be until something charges. Kept because the intent matters when that day comes: on, the charge only ever lands on somebody who did not buy, which is the whole point of charging at all. Off, it becomes a revenue line — and a reason for your most serious customer to stop designing." },
     { key: "charge_failed", label: "A failed generation uses up an allowance", unit: "boolean", required: true,
       help: "Off is almost always right: a third of generations currently return no image, and taking somebody's free attempt for our failure is how they leave. It costs real compute either way, which is the argument for the other setting." },
   ],
