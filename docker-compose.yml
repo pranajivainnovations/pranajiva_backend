@@ -94,6 +94,33 @@ services:
       # Only read when MSG91_OTP_MODE=legacy.
       OTP_HASH_SECRET: ${OTP_HASH_SECRET}
 
+      # ── Razorpay ────────────────────────────────────────────────────────────
+      # The backend is the ONLY place these belong. Both storefronts ask
+      # /store/checkout/razorpay for the key at runtime rather than baking their
+      # own copy, so rotating a key is an edit here and a restart — no rebuild,
+      # and no chance of the two shops disagreeing about which key is live.
+      #
+      # These were missing entirely until now, and the way they failed is worth
+      # knowing: medusa-config.js only registers the payment plugin when the key
+      # looks like a real one (`rzp_...`) and a secret is present. With neither
+      # variable reaching the container that test was false, so the provider was
+      # never registered — nothing logged an error, `razorpay` simply was not a
+      # payment method, and cart completion had nothing to ask whether the money
+      # had arrived. Correct values in .env could not help while the compose file
+      # did not pass them through.
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+
+      # Both optional and both currently unset. They are listed anyway because
+      # compose sets an absent ${VAR} as an EMPTY STRING rather than leaving it
+      # unset (the same trap the MSG91 note above describes) — medusa-config.js
+      # now treats empty as absent for exactly this reason, so leaving them blank
+      # is safe and setting them later needs no change here.
+      #   RAZORPAY_ACCOUNT        — only for Razorpay Route marketplace transfers
+      #   RAZORPAY_WEBHOOK_SECRET — only when webhooks are switched on
+      RAZORPAY_ACCOUNT: ${RAZORPAY_ACCOUNT}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET}
+
 
     restart: unless-stopped
 
@@ -117,7 +144,9 @@ services:
       NEXT_PUBLIC_MEDUSA_BACKEND_URL: ${NEXT_PUBLIC_MEDUSA_BACKEND_URL:-http://13.60.27.11:9001}
       NEXT_PUBLIC_SANITY_PROJECT_ID: ${NEXT_PUBLIC_SANITY_PROJECT_ID:-5ehhoj92}
       NEXT_PUBLIC_SANITY_DATASET: ${NEXT_PUBLIC_SANITY_DATASET:-production}
-      NEXT_PUBLIC_RAZORPAY_KEY_ID: ${NEXT_PUBLIC_RAZORPAY_KEY_ID}
+      # NEXT_PUBLIC_RAZORPAY_KEY_ID is deliberately gone: the storefront now reads
+      # the key from the backend at runtime, so there is one copy of it and it
+      # lives on the service above.
     restart: unless-stopped
     healthcheck:
       # test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://13.60.27.11:3000"]

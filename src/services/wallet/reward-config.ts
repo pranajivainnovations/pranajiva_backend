@@ -23,6 +23,26 @@ export type Mechanic =
   | "joining_cash"
   | "referral"
   | "cashback"
+  /**
+   * The AI Studio. It issues no credit, so it is the one mechanic here that does not pay anybody —
+   * it decides what a generation costs the customer and how many they get for nothing.
+   *
+   * It lives in this catalogue because everything that made this catalogue worth building applies to
+   * it: the numbers are money, they must be movable without a deploy, they must be versioned so a
+   * past charge stays explainable, and every change needs an author. What it does NOT use is the
+   * grant limiters — max_grants and budget_paise count ledger rows, and a generation is not one.
+   */
+  | "studio"
+
+/**
+ * The mechanics that actually issue credit.
+ *
+ * `economics` holds the brand's margin numbers and pays nobody; `studio` prices compute and pays
+ * nobody either. Everything that counts grants, sums issued money or maps a mechanic to a ledger
+ * entry type wants this narrower set — spelling it once keeps those call sites from each carrying
+ * their own exclusion list, which is how one of them ends up out of date.
+ */
+export type GrantMechanic = Exclude<Mechanic, "economics" | "studio">
 
 export interface FieldSpec {
   key: string
@@ -70,6 +90,38 @@ export const FIELDS: Record<Mechanic, FieldSpec[]> = {
       min: 1,
       help: "The order this brand's guardrails and previews are measured against. Not a limit on anything — change it and no customer is affected, but every warning about stacking and every 'you net ₹X' line moves with it.",
     },
+  ],
+
+  /**
+   * The Studio.
+   *
+   * ── Why the free allowances are two numbers, not one ───────────────────────────────────────────
+   * They buy different things. The anonymous allowance buys a landing page that works without a
+   * login wall, which is an SEO position; the signed-in allowance buys the signup itself. Those are
+   * worth different amounts and will be tuned against different evidence, so collapsing them into
+   * one figure would make both untunable.
+   *
+   * Setting the anonymous allowance to 0 is how you keep today's behaviour, where generation
+   * requires an account outright.
+   *
+   * ── Why what it costs us is configuration ──────────────────────────────────────────────────────
+   * It is not a lever — nobody chooses their provider's bill. It is here so the guardrail has
+   * something to compare the price against, and so the free allowance can be read as a rupee figure
+   * rather than a count. A number that only exists in somebody's head cannot warn anyone.
+   */
+  studio: [
+    { key: "free_anonymous", label: "Free generations, signed out", unit: "count", required: true, min: 0, max: 50,
+      help: "What a visitor gets before we ask who they are. This is what makes the landing page work without a login wall — and it is also the only generation nobody can be held to, since there is no mobile behind it. 0 keeps the current behaviour, where signing in comes first." },
+    { key: "free_signed_in", label: "Free generations after signing in", unit: "count", required: true, min: 0, max: 200,
+      help: "What the signup itself buys, on top of the allowance above. Worth more than the compute at almost any sensible number — but multiply it by the unit cost below before setting it, because that product is what every signup costs you whether or not they ever order." },
+    { key: "price_paise", label: "Price per extra generation", unit: "paise", required: true, min: 0,
+      help: "Charged at the point of use once the free allowances are gone, and never taken from the wallet — credit given for marketing must not be spendable on compute. Set it above the unit cost or each extra generation loses money on purpose." },
+    { key: "unit_cost_paise", label: "What one generation costs us", unit: "paise", required: true, min: 0,
+      help: "The provider's bill for one generated design. Not a lever — it is here so the price can be checked against it and so a free allowance can be shown as rupees rather than a count." },
+    { key: "refund_on_order", label: "Refund paid generations when they order", unit: "boolean", required: true,
+      help: "On, the charge only ever lands on somebody who did not buy, which is the whole point of charging. Off, it becomes a revenue line — and a reason for your most serious customer to stop designing." },
+    { key: "charge_failed", label: "A failed generation uses up an allowance", unit: "boolean", required: true,
+      help: "Off is almost always right: a third of generations currently return no image, and taking somebody's free attempt for our failure is how they leave. It costs real compute either way, which is the argument for the other setting." },
   ],
 
   signup_bonus: [
@@ -515,10 +567,16 @@ export async function putVersion(input: NewVersionInput): Promise<RewardConfig> 
     /**
      * Which mechanics have to say where they run.
      *
-     * Economics is the brand's numbers and runs nowhere in particular; everything else, the welcome
-     * bonus included, has to say where it runs.
+     * Economics is the brand's numbers and runs nowhere in particular. The Studio is the second such
+     * case: an image is generated, not delivered, so there is no area for it to run in and a scope
+     * would be a control nobody could explain. Everything else — the welcome bonus included — has to
+     * say where it runs.
+     *
+     * The database enforces the same two exemptions. Both are stated because this one produces a
+     * sentence an operator reads, and a 23514 does not.
      */
-    const servesSomewhere = pincode === null && input.mechanic !== "economics"
+    const servesSomewhere =
+      pincode === null && input.mechanic !== "economics" && input.mechanic !== "studio"
     let scopeMode: ScopeMode | null = null
     let scopePincodes: string[] | null = null
 

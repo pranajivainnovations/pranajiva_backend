@@ -177,3 +177,19 @@ Do not edit by hand, and do not delete — it is the only record of what is live
 - image:   pranajiva-backend:latest
 - target:  ubuntu@13.62.195.167:/home/ubuntu/pranajiva
 - by:      crossfriend2025
+---
+- when:    2026-09-18 03:00:40 UTC  /  2026-09-18 08:30 IST
+- outcome: SUCCESS
+- commit:  a21ed01 (main)
+- tree:    clean
+- image:   pranajiva-backend:latest
+- target:  ubuntu@13.62.195.167:/home/ubuntu/pranajiva
+- by:      crossfriend2025
+---
+- when:    2026-09-21 19:10:29 UTC  /  2026-09-22 00:40 IST
+- outcome: FAILED (exit 255)
+- commit:  a21ed01 (main)
+- tree:    dirty
+- image:   pranajiva-backend:latest
+- target:  ubuntu@13.62.195.167:/home/ubuntu/pranajiva
+- by:      crossfriend2025

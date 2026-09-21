@@ -2,7 +2,7 @@ import { getWalletDbPool } from "./db"
 import type { Brand } from "./ledger"
 import { getActivation, getRepeatRate, type ActivationReport, type RepeatReport } from "./cohorts"
 import { evaluateMechanic, headroomFrom } from "./limiters"
-import type { Mechanic } from "./reward-config"
+import type { Mechanic, GrantMechanic } from "./reward-config"
 
 /**
  * What a pincode's rewards actually did.
@@ -66,14 +66,14 @@ export interface PincodeOutcomes {
   unavailable: string[]
 }
 
-const ENTRY_TYPE: Record<Exclude<Mechanic, "economics">, string> = {
+const ENTRY_TYPE: Record<GrantMechanic, string> = {
   signup_bonus: "signup_bonus",
   joining_cash: "promo_grant",
   referral: "referral_earn",
   cashback: "cashback_earn",
 }
 
-const MECHANICS: Exclude<Mechanic, "economics">[] = [
+const MECHANICS: GrantMechanic[] = [
   "signup_bonus",
   "joining_cash",
   "referral",

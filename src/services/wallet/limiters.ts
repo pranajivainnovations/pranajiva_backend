@@ -1,7 +1,12 @@
 import { getWalletDbPool } from "./db"
 import { areRewardsGloballyEnabled } from "./settings"
 import type { Brand } from "./ledger"
-import { getEffectiveConfig, type EffectiveConfig, type Mechanic } from "./reward-config"
+import {
+  getEffectiveConfig,
+  type EffectiveConfig,
+  type GrantMechanic,
+  type Mechanic,
+} from "./reward-config"
 
 /**
  * May this mechanic grant, here, right now?
@@ -71,7 +76,7 @@ export interface Verdict {
   usage: Usage
 }
 
-const ENTRY_TYPE: Record<Exclude<Mechanic, "economics">, string> = {
+const ENTRY_TYPE: Record<GrantMechanic, string> = {
   signup_bonus: "signup_bonus",
   joining_cash: "promo_grant",
   referral: "referral_earn",

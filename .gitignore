@@ -28,3 +28,15 @@ pranajivainnovationpem.pem
 !.yarn/versions
 
 *.tgz
+
+# Local copies of production config, kept for rollback and never committed.
+# GitHub's push protection caught these once already: a `git add .` swept up an
+# .env backup carrying live AWS, OpenAI, Replicate and Anthropic keys. The rules
+# below are why that cannot happen from a plain `add .` again. `.env.template`
+# stays tracked on purpose — it holds names, not values.
+.env_backup
+.env.bak
+.env.*.bak
+*_backup.yml
+*_backup.yaml
+*.bak
