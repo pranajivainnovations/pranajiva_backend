@@ -219,6 +219,19 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     try {
       const card = await giftCardService.create({
         value: result.amountPaise,
+        /**
+         * `balance` as well as `value`, and it is not redundant.
+         *
+         * GiftCardService.create does NOT derive one from the other — it spreads the input straight
+         * into the row — and `gift_card.balance` is NOT NULL with no default. Passing only `value`
+         * therefore failed on every single apply, which is why no wallet gift card was ever created
+         * and why the customer saw "Could not update your credit on this order".
+         *
+         * Medusa's own admin route does the same thing a line before it calls this service
+         * (`validatedBody.balance = validatedBody.value`), which is the only place the convention is
+         * written down.
+         */
+        balance: result.amountPaise,
         region_id: cart.region_id,
         is_disabled: false,
         metadata: { source: WALLET_GIFT_CARD, cart_id: cartId, customer_id: customerId },

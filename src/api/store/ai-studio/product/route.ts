@@ -1,3 +1,17 @@
+/**
+ * DEAD ROUTE — nothing calls this any more. Scheduled for deletion at the end of the cart cutover.
+ *
+ * It existed for one reason: Medusa's `addItem` took a variantId, so a made-to-order cake had to
+ * become a catalogue entry before it could be put in a cart. That is why the code below creates a
+ * draft product with a shipping profile, a sales channel and an `inventory_quantity` of zero, and
+ * why almost every comment in it records a bug caught live.
+ *
+ * The storefront now adds a design by its own id — `kind: "studio_design"` on /store/cart/items —
+ * and the pricing engine values it server-side, so no catalogue row is written.
+ *
+ * Left in place deliberately rather than deleted today: the cart and checkout PAGES have not moved
+ * across yet, so a storefront rollback is still possible and would need this. It goes when they do.
+ */
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 import { evaluatePrice, persistEvaluation } from "../../../../services/pricing/pricing-engine"
 import { evaluateConstraints } from "../../../../services/constraints/constraint-engine"
