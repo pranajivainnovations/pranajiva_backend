@@ -1,7 +1,7 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import { removeItem, setItemQty } from "../../../../../services/orders/cart"
-import { fail } from "../../route"
+import { fail, quoted } from "../../route"
 
 /**
  * One line in the cart.
@@ -30,7 +30,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     /* Zero means remove, which is what a quantity stepper does at its lower bound — handled here
        rather than making the page know to call a different endpoint. */
     const cart = await setItemQty({ cartId: body.cart_id, itemId, qty: body.qty })
-    res.status(200).json({ cart })
+    res.status(200).json({ cart: await quoted(cart) })
   } catch (error) {
     fail(res, error, `[store/cart/items POST] ${itemId}`)
   }
@@ -49,7 +49,7 @@ export async function DELETE(req: MedusaRequest, res: MedusaResponse): Promise<v
 
   try {
     const cart = await removeItem({ cartId, itemId })
-    res.status(200).json({ cart })
+    res.status(200).json({ cart: await quoted(cart) })
   } catch (error) {
     fail(res, error, `[store/cart/items DELETE] ${itemId}`)
   }

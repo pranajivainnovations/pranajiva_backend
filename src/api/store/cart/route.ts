@@ -1,6 +1,12 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
-import { getCart, getOrCreateCart, type Brand } from "../../../services/orders/cart"
+import {
+  attachCreditQuote,
+  getCart,
+  getOrCreateCart,
+  type Brand,
+  type Cart,
+} from "../../../services/orders/cart"
 
 /**
  * The cart, ours.
@@ -15,6 +21,17 @@ import { getCart, getOrCreateCart, type Brand } from "../../../services/orders/c
  * number only when they place the order. `req.user` is read when present and simply absent when it
  * is not — no branch here refuses a guest.
  */
+
+/**
+ * Every cart that leaves these routes carries what the wallet would allow on it.
+ *
+ * Attached here rather than inside the service because the quote reads a different pool and the
+ * service's writes hold an advisory lock on the cart — see attachCreditQuote. Null-safe: a cart
+ * that was not found stays not found rather than turning into a quote failure.
+ */
+export async function quoted(cart: Cart | null): Promise<Cart | null> {
+  return cart ? attachCreditQuote(cart) : null
+}
 
 function brandOf(req: MedusaRequest): Brand {
   return req.query.brand === "pranajiva" || (req.body as any)?.brand === "pranajiva"
@@ -42,7 +59,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
     }
 
     if (cartId && !customerId) {
-      res.status(200).json({ cart: await getCart(cartId) })
+      res.status(200).json({ cart: await quoted(await getCart(cartId)) })
       return
     }
 
@@ -52,7 +69,7 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
       brand: brandOf(req),
       pincode: typeof req.query.pincode === "string" ? req.query.pincode : null,
     })
-    res.status(200).json({ cart })
+    res.status(200).json({ cart: await quoted(cart) })
   } catch (error) {
     fail(res, error, `[store/cart GET] ${cartId}`)
   }
@@ -75,7 +92,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
       brand: brandOf(req),
       pincode: body.pincode ?? null,
     })
-    res.status(200).json({ cart })
+    res.status(200).json({ cart: await quoted(cart) })
   } catch (error) {
     fail(res, error, "[store/cart POST]")
   }

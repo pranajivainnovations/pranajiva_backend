@@ -1,7 +1,7 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import { addItem, type ItemKind } from "../../../../services/orders/cart"
-import { fail } from "../route"
+import { fail, quoted } from "../route"
 
 /**
  * POST /store/cart/items — put something in the cart.
@@ -56,7 +56,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
          there is no amount field in this request to honour. */
       spec: body.spec ?? {},
     })
-    res.status(200).json({ cart })
+    res.status(200).json({ cart: await quoted(cart) })
   } catch (error) {
     fail(res, error, `[store/cart/items POST] ${body.cart_id}`)
   }

@@ -2,7 +2,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import { getCart } from "../../../../services/orders/cart"
 import { applyCartCredit, releaseCartCredit } from "../../../../services/wallet/cart-credit"
-import { fail } from "../route"
+import { fail, quoted } from "../route"
 
 /**
  * POST /store/cart/credit — put wallet credit on this cart, or take it off.
@@ -57,7 +57,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
         cartId: cart.id,
         reason: "Customer removed their credit at checkout",
       })
-      res.status(200).json({ cart: await getCart(cart.id) })
+      res.status(200).json({ cart: await quoted(await getCart(cart.id)) })
       return
     }
 
@@ -78,14 +78,14 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
       /* Nothing to apply is an ordinary answer, not a failure — somebody with an empty wallet
          pressing the button should see their unchanged total, not an error. */
       res.status(200).json({
-        cart: fresh,
+        cart: await quoted(fresh),
         applied: false,
         reason: (result as any).reason ?? "nothing_to_apply",
       })
       return
     }
 
-    res.status(200).json({ cart: fresh, applied: true })
+    res.status(200).json({ cart: await quoted(fresh), applied: true })
   } catch (error) {
     fail(res, error, `[store/cart/credit] ${body.cart_id}`)
   }

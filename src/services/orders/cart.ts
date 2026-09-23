@@ -1,6 +1,6 @@
 import { getOrdersDbPool } from "./db"
 import { evaluatePrice, persistEvaluation } from "../pricing/pricing-engine"
-import { getCartCredit } from "../wallet/cart-credit"
+import { getCartCredit, quoteCartCredit } from "../wallet/cart-credit"
 
 /**
  * The cart.
@@ -50,6 +50,31 @@ export interface Cart {
   deliveryPaise: number
   creditAppliedPaise: number
   payablePaise: number
+  /**
+   * What the customer could spend here, for the screen to explain itself.
+   *
+   * Null for a guest, and null if the wallet could not be read — never an error, because a cart
+   * that cannot quote credit still shows the right price to pay. Absent from the internal reads
+   * that place an order; it is attached at the route boundary by attachCreditQuote below.
+   */
+  credit?: CreditQuote | null
+}
+
+/**
+ * The three numbers a customer needs, and the reason behind them.
+ *
+ * "You have ₹500" alone is not enough — if only ₹200 of it can go on this order the screen has to
+ * say so before the button is pressed, or the total changes by less than expected and the only
+ * explanation available is that something is broken. `limitedBy` is what turns a number into a
+ * sentence.
+ */
+export interface CreditQuote {
+  balancePaise: number
+  applicablePaise: number
+  appliedPaise: number
+  limitedBy: "balance" | "cap" | "order" | "nothing_to_apply"
+  /** The redemption cap as a whole percentage, so the screen can name the rule it is explaining. */
+  capPercent: number
 }
 
 type Client = {
@@ -457,4 +482,53 @@ function clampQty(qty: number): number {
 
 async function touch(c: Client, cartId: string): Promise<void> {
   await c.query(`UPDATE orders.carts SET updated_at = now() WHERE id = $1`, [cartId])
+}
+
+/**
+ * Attach what the wallet would allow on this cart.
+ *
+ * ── Why this is not part of read() ─────────────────────────────────────────────────────────────
+ * read() runs inside withCart, which holds pg_advisory_xact_lock on the cart for the whole
+ * transaction. The quote reads the wallet — a different pool — and doing that while holding a cart
+ * lock means one customer's slow wallet read blocks every other write to their cart, for no reason:
+ * the quote is never used to decide anything, only to describe. So it runs after the write is
+ * committed and the lock released, at the route boundary.
+ *
+ * ── Why a failure here is silent ───────────────────────────────────────────────────────────────
+ * Same rule as creditOn above. Losing the quote costs an explanation; failing the request costs the
+ * cart. The screen falls back to not offering credit, which is recoverable — offering credit that
+ * cannot be redeemed is not.
+ */
+export async function attachCreditQuote(cart: Cart): Promise<Cart> {
+  if (!cart?.customerId) return { ...cart, credit: null }
+
+  try {
+    const quote = await quoteCartCredit({
+      customerId: cart.customerId,
+      cartId: cart.id,
+      brand: cart.brand,
+      pincode: cart.pincode,
+      /* Measured against what they would actually pay, matching /store/cart/credit exactly. A quote
+         computed against a different base than the apply would offer a number the apply refuses. */
+      payablePaise: cart.subtotalPaise + cart.deliveryPaise,
+      redeemablePaise: cart.subtotalPaise,
+    })
+
+    return {
+      ...cart,
+      credit: {
+        balancePaise: quote.balancePaise,
+        applicablePaise: quote.applicablePaise,
+        appliedPaise: quote.appliedPaise,
+        limitedBy: quote.limitedBy,
+        capPercent: Math.round(quote.capBps / 100),
+      },
+    }
+  } catch (error) {
+    console.error(
+      `[orders/cart] credit quote failed for ${cart.id}: ` +
+        (error instanceof Error ? error.message : String(error))
+    )
+    return { ...cart, credit: null }
+  }
 }

@@ -63,6 +63,14 @@ export interface CartCreditQuote {
   applicablePaise: number
   balancePaise: number
   /**
+   * The OPS redemption cap, in basis points, as it applied to THIS cart.
+   *
+   * Reported so a screen can name it. It binds far more often than the comment below once assumed —
+   * at 1500 it is the reason a customer with a healthy balance is offered a fraction of it, and
+   * "only part of your credit can be used" without a reason reads as a fault rather than a rule.
+   */
+  capBps: number
+  /**
    * What the customer would pay if they used no credit — the figure on their screen, after any
    * coupon and including delivery and tax. The cap is a percentage of this.
    */
@@ -147,6 +155,7 @@ export async function quoteCartCredit(params: {
   return {
     applicablePaise: ceiling,
     balancePaise,
+    capBps,
     payablePaise: params.payablePaise,
     redeemablePaise: params.redeemablePaise,
     appliedPaise: applied?.amountPaise ?? 0,
