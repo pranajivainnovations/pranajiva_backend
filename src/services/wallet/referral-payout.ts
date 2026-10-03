@@ -153,10 +153,19 @@ function brandOfOrder(channelName: string | null, referralBrand: Brand): Brand {
  * place the moment the third was paid, and the referrer would be paid on every order forever.
  *
  * ── What counts as delivered ───────────────────────────────────────────────────────────────────
- * Every baker working an order has marked it delivered, and at least one has. A part-delivered order
- * is not delivered: paying on it would pay before the customer has what they ordered, which is the
- * one thing the hold exists to prevent. Rejected assignments are excluded from that test, because an
- * order reassigned after a rejection would otherwise never qualify.
+ * On the Medusa pipeline: every baker working an order has marked it delivered, and at least one
+ * has. A part-delivered order is not delivered — paying on it would pay before the customer has what
+ * they ordered, which is the one thing the hold exists to prevent. Rejected assignments are excluded
+ * from that test, because an order reassigned after a rejection would otherwise never qualify.
+ *
+ * On ours: the order's own status is `delivered`, moved by ops. One order, one state, no per-baker
+ * arithmetic — the split assignment that made the test above necessary does not exist here.
+ *
+ * ── Why both are read ──────────────────────────────────────────────────────────────────────────
+ * Ordering moved to orders.orders and this query did not follow it, so from the cutover every real
+ * order became invisible to the referral payout and no referrer could be owed anything. Reading
+ * both is not a transition state to tidy up later: the legacy orders are real deliveries that real
+ * referrers were promised commission on, and dropping them would quietly cancel that debt.
  */
 export async function findDuePayouts(params: {
   at?: Date
@@ -166,7 +175,7 @@ export async function findDuePayouts(params: {
   const limit = params.limit ?? 500
 
   const { rows } = await getWalletDbPool().query(
-    `WITH delivered AS (
+    `WITH legacy_delivered AS (
        SELECT bo.order_id, MAX(bo.delivered_at) AS delivered_at
          FROM baker_network.baker_orders bo
         GROUP BY bo.order_id
@@ -175,22 +184,60 @@ export async function findDuePayouts(params: {
               ) = 0
           AND COUNT(*) FILTER (WHERE bo.delivered_at IS NOT NULL) > 0
      ),
-     ranked AS (
+     /**
+      * Both pipelines, before anything is ranked.
+      *
+      * "The first three delivered orders" means the customer's first three, not the first three in
+      * whichever table we happened to look at — so the union has to come BEFORE the ROW_NUMBER. A
+      * customer who ordered twice on Medusa and once since the rebuild has a third order, not a
+      * first, and ranking per source would pay a referrer twice for the same position.
+      */
+     all_delivered AS (
        SELECT o.id            AS order_id,
               o.customer_id   AS referee,
               d.delivered_at,
-              ROW_NUMBER() OVER (
-                PARTITION BY o.customer_id
-                ORDER BY d.delivered_at, o.created_at
-              )               AS order_rank,
+              o.created_at,
               a.address_1, a.address_2, a.city, a.postal_code,
               LOWER(sc.name)  AS channel
-         FROM delivered d
+         FROM legacy_delivered d
          JOIN public."order" o        ON o.id = d.order_id
          LEFT JOIN public.address a   ON a.id = o.shipping_address_id
          LEFT JOIN public.sales_channel sc ON sc.id = o.sales_channel_id
         WHERE o.canceled_at IS NULL
           AND o.customer_id IS NOT NULL
+
+       UNION ALL
+
+       /**
+        * Orders from our own pipeline.
+        *
+        * Delivered is a status here rather than a baker's per-assignment mark, because ops moves the
+        * order itself and the event carries when. The address is a frozen copy on the order, so
+        * there is no join to an address table that could have been edited since.
+        */
+       SELECT oo.id::text     AS order_id,
+              oo.customer_id  AS referee,
+              COALESCE((
+                SELECT MAX(e.at) FROM orders.order_events e
+                 WHERE e.order_id = oo.id AND e.status = 'delivered'
+              ), oo.updated_at) AS delivered_at,
+              oo.created_at,
+              oo.address->>'address_1' AS address_1,
+              oo.address->>'address_2' AS address_2,
+              oo.address->>'city'      AS city,
+              oo.address->>'postal_code' AS postal_code,
+              oo.brand        AS channel
+         FROM orders.orders oo
+        WHERE oo.status = 'delivered'
+          AND oo.customer_id IS NOT NULL
+     ),
+     ranked AS (
+       SELECT k.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY k.referee
+                ORDER BY k.delivered_at, k.created_at
+              ) AS order_rank
+         FROM all_delivered k
      )
      SELECT r.referred_by_customer_id AS referrer,
             r.brand                   AS referral_brand,

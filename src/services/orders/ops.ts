@@ -1,6 +1,7 @@
 import { getOrdersDbPool } from "./db"
 import { recordEvent } from "./order"
 import { notifyOrderStatusDetached } from "./notify"
+import { onOrderCancelledDetached, onOrderPaidDetached } from "./growth"
 
 /**
  * What ops needs to run an order.
@@ -216,7 +217,14 @@ export async function moveOrderStatus(input: {
   if (collectsCash) {
     await recordEvent(db, input.orderId, input.next, input.opsUserId, "Cash collected on delivery")
     notifyOrderStatusDetached({ orderId: input.orderId, status: "paid" })
+    /* A cash order earns joining cash at the door, which is the moment it becomes paid. Whether it
+       QUALIFIES is a separate question the mechanic answers — prepaid_only exists precisely to say
+       cash does not count, and that decision belongs there rather than in a condition here. */
+    onOrderPaidDetached(input.orderId)
   }
+
+  /* A cancelled order takes back what it earned — the wallet decides reclaim or write-off. */
+  if (input.next === "cancelled") onOrderCancelledDetached(input.orderId)
 
   notifyOrderStatusDetached({ orderId: input.orderId, status: input.next })
 

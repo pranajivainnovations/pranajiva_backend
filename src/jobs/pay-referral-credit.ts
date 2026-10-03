@@ -1,3 +1,4 @@
+import { getOrdersDbPool } from "../services/orders/db"
 import { OrderService, type ScheduledJobArgs, type ScheduledJobConfig } from "@medusajs/medusa"
 
 import { sweepReferralPayouts } from "../services/wallet/referral-payout"
@@ -50,6 +51,34 @@ export default async function payReferralCredit({ container }: ScheduledJobArgs)
      * guessing at a figure that becomes somebody's credit.
      */
     const resolveOrderValue = async (orderId: string): Promise<number | null> => {
+      /**
+       * Our own orders first, by the shape of the id.
+       *
+       * A uuid is never a Medusa id — those are `order_01...` — so this cannot mistake one pipeline
+       * for the other. Asking orderService for a uuid raises, and the catch below would log a
+       * warning and skip a payout somebody is actually owed, every night, for ever.
+       */
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId)) {
+        try {
+          const { rows } = await getOrdersDbPool().query(
+            `SELECT subtotal_paise, delivery_paise FROM orders.orders WHERE id = $1::uuid`,
+            [orderId]
+          )
+          if (!rows.length) return null
+          /* Subtotal already excludes delivery here, so there is nothing to subtract — the goods
+             are the goods. Credit the customer spent is deliberately NOT deducted: the referrer
+             earned a commission on an order of that size, and how the customer paid for it is not
+             their business. */
+          return Math.max(0, Number(rows[0].subtotal_paise ?? 0))
+        } catch (error) {
+          logger.warn(
+            `[wallet] could not read the value of order ${orderId} for a referral payout: ` +
+              `${error instanceof Error ? error.message : error}`
+          )
+          return null
+        }
+      }
+
       try {
         /* No select or relations, matching the refund subscriber, which reads `total` the same way
            and is the one piece of this that production has already exercised. Totals are computed

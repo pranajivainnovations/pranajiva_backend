@@ -4,6 +4,7 @@ import { createRazorpayOrder, verifyPaid } from "./razorpay"
 import { releaseCartCredit } from "../wallet/cart-credit"
 import { getEffectiveConfig } from "../wallet/reward-config"
 import { notifyOrderStatusDetached } from "./notify"
+import { onOrderCancelledDetached, onOrderPaidDetached } from "./growth"
 
 /**
  * Orders.
@@ -307,6 +308,10 @@ export async function markOrderPaid(input: {
      */
     notifyOrderStatusDetached({ orderId: order.id, status: "paid" })
 
+    /* And whatever this order earns them. Detached for the same reason: this is the webhook's
+       response path, and Razorpay retries anything slow. */
+    onOrderPaidDetached(order.id)
+
     return { changed: true, orderId: order.id }
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {})
@@ -444,6 +449,8 @@ export async function cancelAbandonedOrders(input: {
         "system",
         "Not paid — order closed and any credit returned"
       )
+      /* And anything it earned. An unpaid order that never happened must not leave a grant behind. */
+      onOrderCancelledDetached(order.id)
       orders += 1
     } catch (error) {
       console.error(
