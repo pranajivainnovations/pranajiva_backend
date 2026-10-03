@@ -15,6 +15,15 @@ import { getBakerNetworkDbPool } from "../baker-network/db"
  * bespoke draft that may not be in baker_products at all, and even when it is, the customer's choice
  * of who bakes it is the more specific fact.
  *
+ * ── Two pipelines, one portal ──────────────────────────────────────────────────────────────────
+ * Ordering moved to orders.orders, where a baker is named directly on the line — ops assigns it, so
+ * there is nothing to derive. Medusa orders still exist and still have real deliveries in them, so
+ * both are read and merged. A baker sees one list and never learns which table their work came from.
+ *
+ * On ours the question "whose item is this" has a column instead of a COALESCE over metadata and
+ * product ownership, because the thing that made that necessary — a bespoke draft product nobody
+ * owned — does not exist any more.
+ *
  * ── Derived on read, persisted on change ────────────────────────────────────────────────────────
  * Nothing writes a baker_orders row at checkout. Membership is computed from line items every time,
  * so an order reaches the right baker the moment it is placed — no event subscriber to miss it, no
@@ -67,6 +76,15 @@ export interface BakerOrderItem {
   unitPrice: number
   /** False for add-ons — shown to ops, hidden from the baker. */
   isBakerItem: boolean
+  /**
+   * What the customer chose: weight, flavour, the message on the cake, the day it is needed.
+   *
+   * Only orders from the current pipeline carry one — a Medusa line item kept the same information
+   * in metadata under different names, and backfilling that for orders already delivered would be
+   * work nobody reads. Absent rather than empty, so the portal can tell "no spec" from "a spec with
+   * nothing in it".
+   */
+  spec?: Record<string, unknown>
 }
 
 export interface BakerOrderSummary {
@@ -102,9 +120,88 @@ const LINE_ITEM_JOINS = `
   LEFT JOIN baker_network.baker_products bp ON bp.medusa_product_id = pv.product_id
 `
 
+/**
+ * Orders from the current pipeline that this baker has work in.
+ *
+ * ── Why this is its own query rather than a UNION ──────────────────────────────────────────────
+ * The two pipelines answer "whose item is this" in genuinely different ways — a COALESCE over line
+ * item metadata and product ownership there, a column here — and forcing both into one statement
+ * would mean a join list that is half-irrelevant whichever row it is producing. Two readable
+ * queries merged by date beat one that nobody can follow.
+ */
+async function listPipelineBakerOrders(
+  bakerId: string,
+  limit: number
+): Promise<BakerOrderSummary[]> {
+  const db = getBakerNetworkDbPool()
+
+  const { rows } = await db.query(
+    `SELECT o.id::text AS order_id, o.display_id, o.created_at, o.address,
+            COALESCE(bo.status, 'new') AS status,
+            COALESCE((
+              SELECT json_agg(json_build_object(
+                       'lineItemId', i.id,
+                       'title', i.title,
+                       'thumbnail', i.spec->>'thumbnail',
+                       'quantity', i.qty,
+                       'unitPrice', i.unit_price_paise / 100.0,
+                       'spec', i.spec
+                     ) ORDER BY i.id)
+                FROM orders.order_items i
+               WHERE i.order_id = o.id AND i.baker_id = $1::text
+            ), '[]'::json) AS items,
+            COALESCE((
+              SELECT SUM(i.qty * i.unit_price_paise) / 100.0
+                FROM orders.order_items i
+               WHERE i.order_id = o.id AND i.baker_id = $1::text
+            ), 0) AS baker_total,
+            (SELECT COUNT(*)::int FROM orders.order_items i WHERE i.order_id = o.id) AS item_count
+       FROM orders.orders o
+       LEFT JOIN baker_network.baker_orders bo
+              ON bo.order_id = o.id::text AND bo.baker_id = $1
+      WHERE o.status <> 'cancelled'
+        AND EXISTS (
+          SELECT 1 FROM orders.order_items i
+           WHERE i.order_id = o.id AND i.baker_id = $1::text
+        )
+      ORDER BY o.created_at DESC
+      LIMIT $2`,
+    [bakerId, limit]
+  )
+
+  return rows.map((r) => {
+    const address = (r.address ?? {}) as Record<string, string>
+    const name = [address.first_name, address.last_name].filter(Boolean).join(" ").trim()
+
+    return {
+      orderId: r.order_id,
+      displayId: r.display_id,
+      status: r.status as BakerOrderStatus,
+      placedAt: r.created_at,
+      customerName: name || null,
+      city: address.city ?? null,
+      postalCode: address.postal_code ?? null,
+      itemCount: r.item_count,
+      bakerTotal: Number(r.baker_total),
+      /* Only this baker's items are selected above, so every one of them is theirs. */
+      items: ((r.items ?? []) as any[]).map((i) => ({
+        lineItemId: i.lineItemId,
+        title: i.title,
+        thumbnail: i.thumbnail ?? null,
+        quantity: i.quantity,
+        unitPrice: Number(i.unitPrice),
+        isBakerItem: true,
+        spec: i.spec ?? {},
+      })),
+    }
+  })
+}
+
 /** Orders containing at least one item this baker is responsible for, newest first. */
 export async function listBakerOrders(bakerId: string, limit = 100): Promise<BakerOrderSummary[]> {
   const db = getBakerNetworkDbPool()
+
+  const current = await listPipelineBakerOrders(bakerId, limit)
 
   const { rows } = await db.query(
     `WITH mine AS (
@@ -154,7 +251,7 @@ export async function listBakerOrders(bakerId: string, limit = 100): Promise<Bak
     [bakerId, limit]
   )
 
-  return rows.map((r) => ({
+  const legacy: BakerOrderSummary[] = rows.map((r) => ({
     orderId: r.id,
     displayId: r.display_id,
     status: r.status as BakerOrderStatus,
@@ -166,6 +263,17 @@ export async function listBakerOrders(bakerId: string, limit = 100): Promise<Bak
     bakerTotal: Number(r.baker_total),
     items: (r.items as BakerOrderItem[]).map((i) => ({ ...i, isBakerItem: true })),
   }))
+
+  /**
+   * One list, newest first, whichever pipeline each order came from.
+   *
+   * Sorted after merging rather than relying on either query's own ORDER BY — two sorted lists
+   * concatenated are not a sorted list, and a baker whose newest order happened to be the legacy
+   * one would find it below yesterday's.
+   */
+  return [...legacy, ...current]
+    .sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime())
+    .slice(0, limit)
 }
 
 /** One order, or null if this baker has nothing in it — the same answer as "no such order". */
@@ -180,6 +288,34 @@ export async function getBakerOrder(
 export interface MoveResult {
   orderId: string
   status: BakerOrderStatus
+}
+
+/** A uuid is one of ours; Medusa ids are `order_01...`, so the shape is enough to tell them apart. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * What a baker's move means for the customer's order.
+ *
+ * ── Why ready and delivered are absent ─────────────────────────────────────────────────────────
+ * CrossFriend owns delivery. A baker's job finishes when the cake is ready; from that point the
+ * order is ours to move, and ops marks it out for delivery and then delivered. A baker marking
+ * their own work "delivered" is a statement about the cake leaving their kitchen, not about it
+ * reaching the customer — mirroring it would tell somebody their cake had arrived when it had not.
+ *
+ * Ready still shows on the ops screen as waiting on us, which is what it is for.
+ */
+const ORDER_STATUS_FOR: Partial<Record<BakerOrderStatus, string>> = {
+  accepted: "accepted",
+  baking: "making",
+}
+
+/** How far along our order statuses run, so a mirror can never move one backwards. */
+const ORDER_RANK: Record<string, number> = {
+  placed: 0,
+  accepted: 1,
+  making: 2,
+  out_for_delivery: 3,
+  delivered: 4,
 }
 
 /**
@@ -207,15 +343,30 @@ export async function moveBakerOrder(input: {
   try {
     await client.query("BEGIN")
 
-    const owns = await client.query(
-      `SELECT 1
-         FROM public.line_item li
-         ${LINE_ITEM_JOINS}
-        WHERE li.order_id = $2
-          AND ${BAKER_OF_LINE_ITEM} = $1
-        LIMIT 1`,
-      [input.bakerId, input.orderId]
-    )
+    /**
+     * Whose order is this, in whichever pipeline it lives.
+     *
+     * Chosen by the id's shape rather than by trying both: asking Postgres to cast a Medusa id to
+     * uuid raises and takes the transaction with it, so a single query with an OR across the two
+     * would fail on exactly the orders it was meant to support.
+     */
+    const isOurs = UUID.test(input.orderId)
+
+    const owns = isOurs
+      ? await client.query(
+          `SELECT 1 FROM orders.order_items
+            WHERE order_id = $2::uuid AND baker_id = $1::text LIMIT 1`,
+          [input.bakerId, input.orderId]
+        )
+      : await client.query(
+          `SELECT 1
+             FROM public.line_item li
+             ${LINE_ITEM_JOINS}
+            WHERE li.order_id = $2
+              AND ${BAKER_OF_LINE_ITEM} = $1
+            LIMIT 1`,
+          [input.bakerId, input.orderId]
+        )
     if (!owns.rowCount) throw new Error("NOT_FOUND")
 
     // Locked so a second tap waits for the first rather than reading a stale status and both
@@ -269,6 +420,58 @@ export async function moveBakerOrder(input: {
         input.opsUserId ?? null,
       ]
     )
+
+    /**
+     * And what the customer sees.
+     *
+     * Only forward, and only for the two states that genuinely mean the order has progressed. The
+     * rank check is what stops a baker who taps "accepted" on an order ops already moved to out for
+     * delivery from winding the customer's timeline backwards — the timeline is append-only to the
+     * customer, so a backwards move would read as the order un-happening.
+     *
+     * A rejection hands the item back: baker_id is cleared, so the order reappears on the ops
+     * screen as needing a baker instead of sitting assigned to somebody who said no.
+     */
+    if (isOurs) {
+      const mirrored = ORDER_STATUS_FOR[input.next]
+
+      if (mirrored) {
+        const { rows: now } = await client.query(
+          `SELECT status FROM orders.orders WHERE id = $1::uuid FOR UPDATE`,
+          [input.orderId]
+        )
+        const currentStatus = now[0]?.status
+        const ahead =
+          currentStatus !== undefined &&
+          ORDER_RANK[currentStatus] !== undefined &&
+          ORDER_RANK[mirrored] > ORDER_RANK[currentStatus]
+
+        if (ahead) {
+          await client.query(
+            `UPDATE orders.orders SET status = $1, updated_at = NOW() WHERE id = $2::uuid`,
+            [mirrored, input.orderId]
+          )
+          await client.query(
+            `INSERT INTO orders.order_events (order_id, status, actor, note)
+             VALUES ($1::uuid, $2, $3, $4)`,
+            [input.orderId, mirrored, `baker:${input.bakerId}`, "Updated by the baker"]
+          )
+        }
+      }
+
+      if (input.next === "rejected") {
+        await client.query(
+          `UPDATE orders.order_items SET baker_id = NULL
+            WHERE order_id = $1::uuid AND baker_id = $2::text`,
+          [input.orderId, input.bakerId]
+        )
+        await client.query(
+          `INSERT INTO orders.order_events (order_id, status, actor, note)
+           VALUES ($1::uuid, (SELECT status FROM orders.orders WHERE id = $1::uuid), $2, $3)`,
+          [input.orderId, `baker:${input.bakerId}`, "Baker declined — needs reassigning"]
+        )
+      }
+    }
 
     await client.query("COMMIT")
     return { orderId: input.orderId, status: input.next }
