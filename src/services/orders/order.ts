@@ -1,6 +1,7 @@
 import { getOrdersDbPool } from "./db"
 import { getCart, type Brand, type Cart } from "./cart"
 import { createRazorpayOrder, verifyPaid } from "./razorpay"
+import { releaseCartCredit } from "../wallet/cart-credit"
 
 /**
  * Orders.
@@ -308,4 +309,96 @@ function shape(r: any): PlacedOrder {
     paymentStatus: r.payment_status,
     status: r.status,
   }
+}
+
+/**
+ * Give back credit on orders nobody paid for.
+ *
+ * ── The hole this closes ───────────────────────────────────────────────────────────────────────
+ * Credit leaves the wallet the moment a customer applies it at the cart, because the amount they
+ * are charged drops at that moment and the two have to agree. release-abandoned-cart-credit gives
+ * it back when a cart never becomes an order. Nothing gave it back when the cart DID become an
+ * order and the order was never paid — the customer closed the tab, the payment failed, they
+ * changed their mind — and the redemption simply stood for ever.
+ *
+ * Found in production with a real balance: a ₹100 signup bonus consumed by two orders that were
+ * placed and never paid, leaving the customer at zero with nothing on any screen explaining where
+ * their money went.
+ *
+ * ── Why it cancels rather than just refunding the credit ───────────────────────────────────────
+ * Because payable_paise is subtotal + delivery − credit, enforced by orders_totals_ck, and a
+ * Razorpay order was created for that figure. Returning the credit while leaving the order open
+ * would leave an order whose total no longer matches what the customer can pay, and the constraint
+ * would refuse the update anyway. An order that has been unpaid this long is not a live order, so
+ * it is closed and the money returned together.
+ *
+ * ── What it will never touch ───────────────────────────────────────────────────────────────────
+ * Anything paid. The guard is on payment_status, not on elapsed time, because a slow UPI collect
+ * that lands after the cutoff must not have its order cancelled underneath it — markOrderPaid is
+ * the authority on whether money arrived, and it always asks Razorpay.
+ */
+export async function cancelAbandonedOrders(input: {
+  olderThanHours?: number
+  at?: Date
+} = {}): Promise<{ orders: number; releasedPaise: number }> {
+  const hours = input.olderThanHours ?? 24
+  const at = input.at ?? new Date()
+  const db = getOrdersDbPool()
+
+  const { rows } = await db.query(
+    `SELECT id, display_id, cart_id, credit_applied_paise
+       FROM orders.orders
+      WHERE payment_status = 'awaiting'
+        AND status = 'placed'
+        AND created_at < $1::timestamptz - ($2 || ' hours')::interval`,
+    [at, String(hours)]
+  )
+
+  let releasedPaise = 0
+  let orders = 0
+
+  for (const order of rows) {
+    /* One order's failure must not strand every later one, so each is handled on its own. */
+    try {
+      /**
+       * Re-checked inside the loop against the live row, not the snapshot above.
+       *
+       * The webhook runs concurrently with this job. An order that was awaiting when the query ran
+       * can be paid by the time its turn comes, and cancelling it then would take the credit back
+       * off an order the customer has actually paid for. The UPDATE carries the condition itself,
+       * so the database decides rather than this process.
+       */
+      const { rowCount } = await db.query(
+        `UPDATE orders.orders
+            SET status = 'cancelled', updated_at = NOW()
+          WHERE id = $1::uuid AND payment_status = 'awaiting' AND status = 'placed'`,
+        [order.id]
+      )
+      if (!rowCount) continue
+
+      if (Number(order.credit_applied_paise) > 0 && order.cart_id) {
+        const { releasedPaise: back } = await releaseCartCredit({
+          cartId: String(order.cart_id),
+          reason: `Order #${order.display_id} was not paid — credit returned`,
+        })
+        releasedPaise += back
+      }
+
+      await recordEvent(
+        db,
+        order.id,
+        "cancelled",
+        "system",
+        "Not paid — order closed and any credit returned"
+      )
+      orders += 1
+    } catch (error) {
+      console.error(
+        `[orders] could not close unpaid order ${order.id}: ` +
+          (error instanceof Error ? error.message : String(error))
+      )
+    }
+  }
+
+  return { orders, releasedPaise }
 }

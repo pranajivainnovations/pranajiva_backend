@@ -344,6 +344,23 @@ export async function releaseStaleCartCredit(params: {
         )
         AND NOT EXISTS (
           SELECT 1 FROM public."order" o WHERE o.cart_id = e.cart_id
+        )
+        /**
+         * And it must not have become one of OUR orders either.
+         *
+         * The Medusa check above was the whole test until the ordering pipeline moved to
+         * orders.orders, at which point every new order looked exactly like an abandoned cart to
+         * this query — no row in public."order", a redemption more than six hours old, and no gift
+         * card to fail the canRelease check because the new pipeline does not mint one. The sweep
+         * would have handed the credit back while the order still recorded it as spent, so the
+         * customer keeps the discount AND the money.
+         *
+         * Cast the uuid to text rather than e.cart_id to uuid: this column holds Medusa's
+         * cart_01M... ids too, and casting those to uuid raises invalid input syntax for the whole
+         * statement rather than simply not matching.
+         */
+        AND NOT EXISTS (
+          SELECT 1 FROM orders.orders oo WHERE oo.cart_id::text = e.cart_id
         )`,
     [at, String(hours)]
   )
