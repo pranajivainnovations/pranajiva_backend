@@ -1,6 +1,7 @@
 import { getOrdersDbPool } from "./db"
 import { evaluatePrice, persistEvaluation } from "../pricing/pricing-engine"
 import { getCartCredit, quoteCartCredit } from "../wallet/cart-credit"
+import { getEffectiveConfig } from "../wallet/reward-config"
 
 /**
  * The cart.
@@ -32,6 +33,10 @@ export interface CartItem {
   kind: ItemKind
   refId: string
   title: string
+  /** Null for a studio design, whose image is reached through ai_studio by its own id. */
+  thumbnail: string | null
+  /** The catalogue product's metadata, frozen at add time — category badges read it. */
+  metadata: Record<string, unknown> | null
   qty: number
   unitPricePaise: number
   linePaise: number
@@ -46,7 +51,7 @@ export interface Cart {
   status: string
   items: CartItem[]
   subtotalPaise: number
-  /** Always 0. Delivery is free; the field exists so the shape does not change when it is not. */
+  /** From the brand's fulfilment config. Zero everywhere today, and a setting rather than a rule. */
   deliveryPaise: number
   creditAppliedPaise: number
   payablePaise: number
@@ -108,7 +113,12 @@ export async function getCart(cartId: string, client?: Client): Promise<Cart | n
     [cartId]
   )
 
-  return shape(carts[0], items, await creditOn(cartId, client))
+  const [creditApplied, deliveryPaise] = await Promise.all([
+    creditOn(cartId, client),
+    deliveryFor(carts[0].brand, carts[0].pincode, items),
+  ])
+
+  return shape(carts[0], items, creditApplied, deliveryPaise)
 }
 
 /**
@@ -128,12 +138,47 @@ async function creditOn(cartId: string, client?: Client): Promise<number> {
   }
 }
 
-function shape(cart: any, items: any[], creditAppliedPaise: number): Cart {
+/**
+ * What delivery costs this cart.
+ *
+ * ── Why it is a config read and not a constant ─────────────────────────────────────────────────
+ * It was `const deliveryPaise = 0`, which was true and is still true, but it was true in a place
+ * nobody could change. The two brands deliver differently — a cake across a city, a jar across the
+ * country — and the number has to be movable from OPS without a deploy when that stops being free.
+ *
+ * Never fatal: a config that cannot be read means free delivery, because the alternative is a cart
+ * that will not render over a number that is currently zero everywhere.
+ */
+async function deliveryFor(brand: Brand, pincode: string | null, items: any[]): Promise<number> {
+  try {
+    const subtotal = items.reduce((sum, r) => sum + r.qty * r.unit_price_paise, 0)
+    const config = await getEffectiveConfig(brand, pincode, "fulfilment")
+    const flat = Number(config?.params.delivery_flat_paise ?? 0)
+    const freeAbove = Number(config?.params.delivery_free_above_paise ?? 0)
+
+    if (!flat) return 0
+    /* A threshold of zero means always free — set the charge first, then the threshold. */
+    if (freeAbove > 0 && subtotal >= freeAbove) return 0
+    /* An empty cart is not charged for delivery it is not having. */
+    return items.length ? flat : 0
+  } catch {
+    return 0
+  }
+}
+
+function shape(
+  cart: any,
+  items: any[],
+  creditAppliedPaise: number,
+  deliveryPaise: number
+): Cart {
   const shaped: CartItem[] = items.map((r) => ({
     id: r.id,
     kind: r.kind,
     refId: r.ref_id,
     title: String(r.spec?.title ?? titleFor(r.kind, r.spec)),
+    thumbnail: (r.spec?.thumbnail as string | null) ?? null,
+    metadata: (r.spec?.metadata as Record<string, unknown> | null) ?? null,
     qty: r.qty,
     unitPricePaise: r.unit_price_paise,
     linePaise: r.qty * r.unit_price_paise,
@@ -141,7 +186,6 @@ function shape(cart: any, items: any[], creditAppliedPaise: number): Cart {
   }))
 
   const subtotalPaise = shaped.reduce((sum, i) => sum + i.linePaise, 0)
-  const deliveryPaise = 0
 
   return {
     id: cart.id,
@@ -175,11 +219,19 @@ async function resolvePrice(input: {
   spec: Record<string, unknown>
   pincode: string | null
   customerId: string | null
-}): Promise<{ unitPricePaise: number; title: string; priceEvaluationId: string | null }> {
+}): Promise<{
+  unitPricePaise: number
+  title: string
+  /** Frozen onto the line, like the title — see the note on freezing below. */
+  thumbnail: string | null
+  /** The product's own metadata, which the storefronts read for category badges and flags. */
+  metadata: Record<string, unknown> | null
+  priceEvaluationId: string | null
+}> {
   if (input.kind === "catalogue") {
     const db = getOrdersDbPool()
     const { rows } = await db.query(
-      `SELECT v.title AS variant_title, p.title AS product_title, ma.amount
+      `SELECT v.title AS variant_title, p.title AS product_title, p.thumbnail, p.metadata, ma.amount
          FROM product_variant v
          JOIN product p ON p.id = v.product_id
          JOIN product_variant_money_amount pv ON pv.variant_id = v.id
@@ -196,6 +248,10 @@ async function resolvePrice(input: {
     return {
       unitPricePaise: Number(rows[0].amount),
       title: [rows[0].product_title, rows[0].variant_title].filter(Boolean).join(" — "),
+      /* Frozen with the title and for the same reason: a cart that re-reads the catalogue to draw
+         itself shows a picture that can change under somebody between adding and paying. */
+      thumbnail: rows[0].thumbnail ?? null,
+      metadata: rows[0].metadata ?? null,
       priceEvaluationId: null,
     }
   }
@@ -229,6 +285,9 @@ async function resolvePrice(input: {
     /* RUPEES to paise — the one conversion in this file. */
     unitPricePaise: Math.round(result.total * 100),
     title: titleFor("studio_design", spec),
+    /* A design's picture lives in ai_studio and is reached by its own id, not carried here. */
+    thumbnail: null,
+    metadata: null,
     priceEvaluationId,
   }
 }
@@ -373,7 +432,12 @@ export async function addItem(input: {
           input.refId,
           qty,
           priced.unitPricePaise,
-          JSON.stringify({ ...spec, title: priced.title }),
+          JSON.stringify({
+            ...spec,
+            title: priced.title,
+            thumbnail: priced.thumbnail,
+            metadata: priced.metadata,
+          }),
           priced.priceEvaluationId,
         ]
       )

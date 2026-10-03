@@ -19,6 +19,15 @@ import type { Brand } from "./ledger"
 
 export type Mechanic =
   | "economics"
+  /**
+   * How a brand fulfils an order: what delivery costs, and whether cash on delivery is offered.
+   *
+   * Here rather than in code because the two brands genuinely differ and the difference is a
+   * business decision, not an architectural one. CrossFriend delivers a cake locally, same day,
+   * prepaid. PranaJiva posts a jar of powder across the country, where cash on delivery is what
+   * most of the market still expects. Hard-coding either would make the other wrong.
+   */
+  | "fulfilment"
   | "signup_bonus"
   | "joining_cash"
   | "referral"
@@ -42,7 +51,7 @@ export type Mechanic =
  * entry type wants this narrower set — spelling it once keeps those call sites from each carrying
  * their own exclusion list, which is how one of them ends up out of date.
  */
-export type GrantMechanic = Exclude<Mechanic, "economics" | "studio">
+export type GrantMechanic = Exclude<Mechanic, "economics" | "studio" | "fulfilment">
 
 export interface FieldSpec {
   key: string
@@ -127,6 +136,22 @@ export const FIELDS: Record<Mechanic, FieldSpec[]> = {
       help: "NOT IN USE, and it cannot be until something charges. Kept because the intent matters when that day comes: on, the charge only ever lands on somebody who did not buy, which is the whole point of charging at all. Off, it becomes a revenue line — and a reason for your most serious customer to stop designing." },
     { key: "charge_failed", label: "A failed generation uses up an allowance", unit: "boolean", required: true,
       help: "Off is almost always right: a third of generations currently return no image, and taking somebody's free attempt for our failure is how they leave. It costs real compute either way, which is the argument for the other setting." },
+  ],
+
+  /**
+   * ── Why delivery is a free-above threshold and not a table of rates ────────────────────────────
+   * Because the decision a customer makes is "is it worth adding one more thing", and a threshold
+   * is the only delivery pricing that speaks to it. Distance bands, weight slabs and peak-hour
+   * multipliers were all considered and parked deliberately: they complicate the cart for a number
+   * that is currently zero, and none of them can be explained on a line of a summary.
+   */
+  fulfilment: [
+    { key: "delivery_flat_paise", label: "Delivery charge", unit: "paise", required: true, min: 0,
+      help: "What delivery costs on an order below the threshold. Zero means free delivery everywhere, which is where both brands start. Charged once per order, never per item." },
+    { key: "delivery_free_above_paise", label: "Free delivery above", unit: "paise", required: true, min: 0,
+      help: "Order value at or above which delivery is free. Zero means always free, and is the setting that makes the charge above irrelevant — set the charge first, then this." },
+    { key: "cod_enabled", label: "Offer cash on delivery", unit: "boolean", required: true,
+      help: "On for posted goods, where a large part of the Indian market will not prepay a brand they have not bought from. Off for made-to-order work: a cake is made before it travels, so a refused delivery is a total loss rather than a return to stock. That asymmetry is the whole reason this is per brand." },
   ],
 
   signup_bonus: [

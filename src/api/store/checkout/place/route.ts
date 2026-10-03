@@ -35,7 +35,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
   const body = (req.body ?? {}) as {
     cart_id?: string
     address?: Record<string, unknown>
+    payment_method?: string
   }
+
+  /* Anything but an explicit "cod" is prepaid. The brand's own config decides whether cod is
+     allowed at all, in placeOrder, where a request body cannot reach past it. */
+  const paymentMethod = body.payment_method === "cod" ? "cod" : "razorpay"
 
   if (!body.cart_id) {
     res.status(400).json({ error: "cart_id is required.", code: "cart_id_required" })
@@ -57,7 +62,9 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
     return
   }
 
-  if (!isConfigured()) {
+  /* Only prepaid orders need a gateway. A cash order placed while Razorpay is misconfigured is a
+     perfectly good order, and refusing it would take the shop down for a reason it does not have. */
+  if (paymentMethod === "razorpay" && !isConfigured()) {
     res.status(503).json({
       error: "Card payment is unavailable right now. Please contact us to complete your order.",
       code: "gateway_unconfigured",
@@ -70,7 +77,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
        cart, whose id may differ from the one the browser sent. */
     const cart = await claimCart({ cartId: body.cart_id, customerId })
 
-    const { order } = await placeOrder({ cartId: cart.id, customerId, address })
+    const { order } = await placeOrder({ cartId: cart.id, customerId, address, paymentMethod })
 
     res.status(200).json({
       order: {
@@ -79,10 +86,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
         payable_paise: order.payablePaise,
         credit_applied_paise: order.creditAppliedPaise,
         payment_status: order.paymentStatus,
+        payment_method: paymentMethod,
       },
-      /* Everything the payment window needs, already settled. The browser passes it through and
-         decides nothing — see the shared razorpay module in the storefronts. */
-      payment: {
+      /**
+       * Everything the payment window needs, already settled. The browser passes it through and
+       * decides nothing — see the shared razorpay module in the storefronts.
+       *
+       * Null for a cash order: there is no window to open, and sending a payment context for one
+       * would invite a checkout to open Razorpay for an order nobody owes money on yet.
+       */
+      payment: paymentMethod === "cod" ? null : {
         key_id: process.env.RAZORPAY_KEY_ID || process.env.RAZORPAY_ID,
         order_id: order.razorpayOrderId,
         amount: order.payablePaise,

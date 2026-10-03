@@ -2,6 +2,8 @@ import { getOrdersDbPool } from "./db"
 import { getCart, type Brand, type Cart } from "./cart"
 import { createRazorpayOrder, verifyPaid } from "./razorpay"
 import { releaseCartCredit } from "../wallet/cart-credit"
+import { getEffectiveConfig } from "../wallet/reward-config"
+import { notifyOrderStatusDetached } from "./notify"
 
 /**
  * Orders.
@@ -23,8 +25,11 @@ import { releaseCartCredit } from "../wallet/cart-credit"
  * thing that makes running both safe.
  */
 
+export type PaymentMethod = "razorpay" | "cod"
+
 export interface PlacedOrder {
   id: string
+  paymentMethod?: PaymentMethod
   displayId: number
   payablePaise: number
   subtotalPaise: number
@@ -60,7 +65,10 @@ export async function placeOrder(input: {
   cartId: string
   customerId: string
   address: Record<string, unknown>
+  /** Defaults to prepaid. "cod" is refused unless the brand's fulfilment config allows it. */
+  paymentMethod?: PaymentMethod
 }): Promise<{ order: PlacedOrder; cart: Cart }> {
+  const paymentMethod: PaymentMethod = input.paymentMethod === "cod" ? "cod" : "razorpay"
   const cart = await getCart(input.cartId)
 
   if (!cart) throw new OrderError("no_cart", "Your cart has expired. Please start again.")
@@ -75,6 +83,22 @@ export async function placeOrder(input: {
   if (cart.customerId && cart.customerId !== input.customerId) {
     throw new OrderError("not_your_cart", "Please start a new cart.", 403)
   }
+  /**
+   * Cash on delivery, only where the brand allows it.
+   *
+   * Checked against the config rather than hard-coded by brand, because which brands offer it is a
+   * business decision — and checked on the SERVER because "cod" arriving in a request body is
+   * otherwise a way to place a CrossFriend order that skips payment entirely. A cake is made before
+   * it travels; a refused delivery is a total loss rather than a return to stock, which is exactly
+   * why CrossFriend has it switched off.
+   */
+  if (paymentMethod === "cod") {
+    const config = await getEffectiveConfig(cart.brand, cart.pincode, "fulfilment")
+    if (!config?.params.cod_enabled) {
+      throw new OrderError("cod_not_offered", "Cash on delivery is not available for this order.")
+    }
+  }
+
   if (cart.payablePaise <= 0) {
     /* Fully covered by credit is a real case and needs its own path — there is nothing for Razorpay
        to collect. Refused here rather than sent to a gateway that would reject a zero amount. */
@@ -105,10 +129,10 @@ export async function placeOrder(input: {
     const { rows: created } = await client.query(
       `INSERT INTO orders.orders
          (cart_id, customer_id, brand, subtotal_paise, delivery_paise,
-          credit_applied_paise, payable_paise, address)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          credit_applied_paise, payable_paise, address, payment_method)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING id, display_id, subtotal_paise, credit_applied_paise, payable_paise,
-                 razorpay_order_id, payment_status, status`,
+                 razorpay_order_id, payment_status, status, payment_method`,
       [
         input.cartId,
         input.customerId,
@@ -118,6 +142,7 @@ export async function placeOrder(input: {
         cart.creditAppliedPaise,
         cart.payablePaise,
         JSON.stringify(input.address),
+        paymentMethod,
       ]
     )
     order = shape(created[0])
@@ -139,7 +164,13 @@ export async function placeOrder(input: {
       `UPDATE orders.carts SET status = 'ordered', updated_at = now() WHERE id = $1`,
       [input.cartId]
     )
-    await recordEvent(client, order.id, "placed", "system", "Order placed, awaiting payment")
+    await recordEvent(
+      client,
+      order.id,
+      "placed",
+      "system",
+      paymentMethod === "cod" ? "Order placed, to be paid on delivery" : "Order placed, awaiting payment"
+    )
 
     await client.query("COMMIT")
   } catch (error) {
@@ -147,6 +178,16 @@ export async function placeOrder(input: {
     throw error
   } finally {
     client.release()
+  }
+
+  /**
+   * A cash order is finished here.
+   *
+   * No gateway, no payment to wait on, and the database refuses a razorpay_order_id on it. The money
+   * arrives at the door, which is why OPS marking it delivered is what moves it to paid.
+   */
+  if (paymentMethod === "cod") {
+    return { order, cart }
   }
 
   /**
@@ -255,6 +296,17 @@ export async function markOrderPaid(input: {
       "Payment confirmed by Razorpay"
     )
     await client.query("COMMIT")
+
+    /**
+     * Told after the money is committed, never before, and never awaited.
+     *
+     * After the COMMIT because a text saying "payment confirmed" must not be able to go out ahead of
+     * a transaction that then rolls back. Not awaited because this is also the webhook's response
+     * path — Razorpay retries anything slow, and an 8-second SMS timeout inside it would turn one
+     * confirmed payment into a stream of duplicate deliveries.
+     */
+    notifyOrderStatusDetached({ orderId: order.id, status: "paid" })
+
     return { changed: true, orderId: order.id }
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {})
@@ -308,6 +360,7 @@ function shape(r: any): PlacedOrder {
     razorpayOrderId: r.razorpay_order_id,
     paymentStatus: r.payment_status,
     status: r.status,
+    paymentMethod: r.payment_method,
   }
 }
 
