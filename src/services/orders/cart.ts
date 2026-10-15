@@ -98,7 +98,35 @@ const MAX_QTY = 99
  * last night — and if a price genuinely needs to move, that is a deliberate re-add, not a surprise
  * at the bottom of a page they were already reading.
  */
+/**
+ * Whether a string can be a cart id at all.
+ *
+ * ── Why this exists ────────────────────────────────────────────────────────────────────────────
+ * orders.carts.id is a uuid. Medusa's cart ids were ULIDs of the form `cart_01KW68Y0DG...`, and
+ * browsers that used this site before ordering moved off Medusa still hold one in localStorage.
+ * Passing it to Postgres does not return "no rows" — it raises
+ *
+ *     invalid input syntax for type uuid: "cart_01KW68Y0DGT5GFG202ZWZ3H7PF"
+ *
+ * which surfaced as a 500 on POST /store/cart and POST /store/cart/items. Every returning visitor
+ * from before the migration had a permanently broken cart: they could not add anything, and they
+ * could not even get a new cart, because the storefront sends its stored id along when asking for
+ * one. A visitor with empty localStorage was fine, which is why it never showed up in testing.
+ *
+ * Treating an unparseable id as "no such cart" is the correct reading of it — that cart genuinely
+ * does not exist here — and it lets getOrCreateCart fall through and issue a fresh one, which
+ * repairs the browser on the next request with no action from anybody.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function isCartId(value: string | null | undefined): boolean {
+  return typeof value === "string" && UUID_RE.test(value.trim())
+}
+
 export async function getCart(cartId: string, client?: Client): Promise<Cart | null> {
+  /* A stale Medusa id, or anything else that is not a uuid, is not a cart we have. */
+  if (!isCartId(cartId)) return null
+
   const db = client ?? getOrdersDbPool()
 
   const { rows: carts } = await db.query(
@@ -385,6 +413,10 @@ export async function addItem(input: {
   const qty = clampQty(input.qty ?? 1)
   const spec = input.spec ?? {}
 
+  if (!isCartId(input.cartId)) {
+    throw new CartError("no_cart", "Your cart has expired. Please start again.")
+  }
+
   return withCart(input.cartId, async (c) => {
     const { rows: carts } = await c.query(
       `SELECT id, customer_id, pincode, status FROM orders.carts WHERE id = $1`,
@@ -453,6 +485,10 @@ export async function setItemQty(input: {
   itemId: string
   qty: number
 }): Promise<Cart> {
+  if (!isCartId(input.cartId)) {
+    throw new CartError("no_cart", "Your cart has expired. Please start again.")
+  }
+
   return withCart(input.cartId, async (c) => {
     if (input.qty <= 0) {
       await c.query(`DELETE FROM orders.cart_items WHERE id = $1 AND cart_id = $2`,
@@ -483,6 +519,10 @@ export async function removeItem(input: { cartId: string; itemId: string }): Pro
  * has to update the cookie and guessing would leave the browser pointed at an abandoned cart.
  */
 export async function claimCart(input: { cartId: string; customerId: string }): Promise<Cart> {
+  if (!isCartId(input.cartId)) {
+    throw new CartError("no_cart", "Your cart has expired. Please start again.")
+  }
+
   return withCart(input.cartId, async (c) => {
     const { rows: carts } = await c.query(
       `SELECT id, customer_id, brand, status FROM orders.carts WHERE id = $1`,
