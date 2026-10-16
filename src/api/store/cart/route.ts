@@ -59,7 +59,22 @@ export async function GET(req: MedusaRequest, res: MedusaResponse): Promise<void
     }
 
     if (cartId && !customerId) {
-      res.status(200).json({ cart: await quoted(await getCart(cartId)) })
+      /**
+       * A cart that has already been ordered is not this browser's cart any more.
+       *
+       * `getCart` reads a cart by id whatever its status, which is right for the order code that
+       * has to look at what was bought. It is wrong here. Placing an order marks the cart
+       * `ordered`, and a guest's browser goes on holding that id — so this route kept handing back
+       * the finished order's lines as a live cart. The shopper saw items they had already paid for,
+       * could not clear them, and every add raised `cart_closed` against a cart they could not see
+       * the end of.
+       *
+       * Signed-in shoppers never hit this because `getOrCreateCart` below filters on
+       * `status = 'active'` and opens a fresh cart. Answering null does the same thing for a
+       * guest: the storefront sees no cart and asks for a new one on the next add.
+       */
+      const found = await getCart(cartId)
+      res.status(200).json({ cart: found?.status === "active" ? await quoted(found) : null })
       return
     }
 

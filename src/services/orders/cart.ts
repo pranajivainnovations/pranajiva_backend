@@ -368,6 +368,30 @@ export async function getOrCreateCart(input: {
 }): Promise<Cart> {
   const db = getOrdersDbPool()
 
+  /**
+   * A cart filled before signing in becomes theirs here, not at the till.
+   *
+   * `claimCart` was wired to one caller: the place-order route. So everything between signing in
+   * and paying treated a guest's cart as still nobody's — and the branch below, which looks a
+   * customer up by id, would find their own (usually empty) cart and return that instead. The
+   * basket someone filled as a guest simply stopped being shown, while still sitting in the table
+   * as an unclaimed active cart. That is not hypothetical: cart 08ae427d held four items at 23:17
+   * on 2026-10-15 and the order placed twenty minutes later by the customer who filled it
+   * contained one, because they had to add it again after signing in.
+   *
+   * Claiming here covers every route that resolves a cart, so it happens on the first request
+   * after sign-in instead of at the end. `claimCart` is the same function the till used: it
+   * attaches the cart when the customer has no other, and merges into theirs when they do.
+   */
+  if (input.customerId && input.cartId) {
+    const guest = await getCart(input.cartId)
+    if (guest && guest.status === "active" && guest.brand === input.brand) {
+      const claimed = await claimCart({ cartId: guest.id, customerId: input.customerId })
+      if (input.pincode) await setPincode(claimed.id, input.pincode)
+      return (await getCart(claimed.id))!
+    }
+  }
+
   if (input.customerId) {
     const { rows } = await db.query(
       `SELECT id FROM orders.carts
@@ -382,7 +406,15 @@ export async function getOrCreateCart(input: {
 
   if (input.cartId) {
     const existing = await getCart(input.cartId)
-    if (existing && existing.status === "active") {
+    /**
+     * The brand check is not decoration.
+     *
+     * A cart id carries no brand with it, and this branch used to accept any active cart it named.
+     * One mobile number is one customer across CrossFriend and PranaJiva, so a browser on one site
+     * holding the other site's cart id was handed that cart — its lines, its total — and the
+     * storefront then stored its id and added to it. Two shops sharing one basket.
+     */
+    if (existing && existing.status === "active" && existing.brand === input.brand) {
       if (input.pincode) await setPincode(existing.id, input.pincode)
       return (await getCart(existing.id))!
     }
