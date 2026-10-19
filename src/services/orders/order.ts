@@ -188,6 +188,26 @@ export async function placeOrder(input: {
    * arrives at the door, which is why OPS marking it delivered is what moves it to paid.
    */
   if (paymentMethod === "cod") {
+    /**
+     * Confirmed to the customer here, and only for cash.
+     *
+     * This is the moment the storefront shows "Your order is confirmed · Order #1082", so it is the
+     * moment the text should arrive — the screen and the SMS say the same thing about the same
+     * number, because `ORDER` is the display_id that screen prints.
+     *
+     * A card order deliberately does NOT get this. Its order row exists before any money has moved,
+     * so firing here would confirm an order to somebody who then closes the Razorpay window without
+     * paying — which has already happened once. For that path the confirmation is the `paid` rule,
+     * fired by confirmOrderPaid below, at the moment the same screen appears for them.
+     *
+     * Detached because an eight-second MSG91 timeout must not sit inside the shopper's Place Order
+     * press, and the order is already committed above regardless of what the provider does.
+     */
+    notifyOrderStatusDetached({ orderId: order.id, status: "placed" })
+
+    /* And us, on the same occasion and for the same reason — a cash order is real the moment it
+       exists, so this is the moment somebody has work to do. The rule carries the number. */
+    notifyOrderStatusDetached({ orderId: order.id, status: "ops_new_order" })
     return { order, cart }
   }
 
@@ -307,6 +327,17 @@ export async function markOrderPaid(input: {
      * confirmed payment into a stream of duplicate deliveries.
      */
     notifyOrderStatusDetached({ orderId: order.id, status: "paid" })
+
+    /**
+     * And us — but only now, not when the order row was written.
+     *
+     * A card order exists before any money has moved, and an order whose shopper then closes the
+     * Razorpay window is not work for anybody. Alerting at creation would have paged somebody for
+     * order 1088, which was exactly that. Payment is the first moment a card order is real, so it
+     * is the moment the alert belongs, and the unique index on the log means an order alerted here
+     * can never be alerted twice.
+     */
+    notifyOrderStatusDetached({ orderId: order.id, status: "ops_new_order" })
 
     /* And whatever this order earns them. Detached for the same reason: this is the webhook's
        response path, and Razorpay retries anything slow. */

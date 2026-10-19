@@ -39,6 +39,45 @@ export interface NotifyOutcome {
   detail?: string
 }
 
+/**
+ * The variables every order template may use.
+ *
+ * ── Why these names and not nicer ones ────────────────────────────────────────────────────────
+ * They are the names registered in the approved MSG91 templates — `##name##`, `##order_id##`,
+ * `##amount##` — and MSG91 matches by name. It also does NOT error on a mismatch: it substitutes
+ * an empty string and delivers "Hi , your Pranajiva order  is confirmed", reports it as sent, and
+ * shows nothing wrong on any dashboard. So these strings are not a style choice, they are a
+ * contract with six DLT-approved templates, and renaming either side silently empties every
+ * message. Changing one means editing the template in MSG91 first.
+ *
+ * The same set goes to every template: MSG91 ignores variables a template did not register, so a
+ * newly approved template needs no change here. Values are strings because that is what the flow
+ * endpoint takes.
+ *
+ * ── Why an internal alert puts the order number in `name` ─────────────────────────────────────
+ * Because the approved Pranajiva_New_Order_Alert reads "New Pranajiva order ##name## for Rs
+ * ##amount##" — the order number sits in the `name` slot, not the `order_id` one. Sending the
+ * customer's first name there would page the on-call with "New Pranajiva order Ritu", which names
+ * the one person who is not the subject of the alert. Both variables carry the number instead, so
+ * the message is right as the template stands and stays right if the template is corrected to use
+ * `##order_id##`.
+ */
+function orderVariables(row: {
+  display_id: unknown
+  payable_paise: unknown
+  recipient_mobile?: string | null
+  address?: { first_name?: string } | null
+}): Record<string, string> {
+  const order = String(row.display_id)
+  const internal = Boolean(row.recipient_mobile)
+
+  return {
+    order_id: order,
+    name: internal ? order : String(row.address?.first_name ?? "there"),
+    amount: String(Math.round(Number(row.payable_paise) / 100)),
+  }
+}
+
 /** Ten digits, however the number was stored — +91, 91, spaces and all. */
 function tenDigits(raw: string | null | undefined): string | null {
   if (!raw) return null
@@ -50,9 +89,10 @@ function tenDigits(raw: string | null | undefined): string | null {
 /**
  * Announce one status change.
  *
- * `status` is the order status, plus the pseudo-status `paid`, which is not an order status at all
- * — payment moves on its own track — but is the single thing customers most want confirmed, so it
- * gets a rule of its own rather than being folded into `placed`.
+ * `status` is the order status, plus two occasions that are not order statuses at all: `paid`,
+ * because payment moves on its own track and is the single thing customers most want confirmed, and
+ * `ops_new_order`, which is addressed to us rather than to the customer. Both get a rule of their
+ * own rather than being folded into `placed`, and `orders.orders` still refuses either as a status.
  */
 export async function notifyOrderStatus(input: {
   orderId: string
@@ -64,7 +104,7 @@ export async function notifyOrderStatus(input: {
     const { rows } = await db.query(
       `SELECT o.id, o.display_id, o.brand, o.payable_paise, o.address,
               c.phone AS customer_phone,
-              r.is_enabled, r.template_id,
+              r.is_enabled, r.template_id, r.recipient_mobile,
               t.provider_template_id, t.label AS template_label,
               EXISTS (
                 SELECT 1 FROM orders.notifications n
@@ -86,28 +126,29 @@ export async function notifyOrderStatus(input: {
     if (!row.is_enabled) return { sent: false, reason: "disabled" }
     if (!row.provider_template_id) return { sent: false, reason: "no_template" }
 
-    /* The order's own address phone is the one the customer gave for THIS delivery, so it beats the
-       account number — they are usually the same and, when they are not, the delivery one is right. */
-    const mobile = tenDigits(row.address?.phone) ?? tenDigits(row.customer_phone)
+    /**
+     * Who hears about it.
+     *
+     * A rule carrying `recipient_mobile` is an internal alert — it goes to that number and never to
+     * the customer. Checked before the customer's own number rather than after, because falling
+     * back from a misconfigured internal rule to the shopper's phone would send our ops chatter to
+     * them, which is the one failure here that cannot be taken back.
+     *
+     * Otherwise: the order's own address phone is the one the customer gave for THIS delivery, so it
+     * beats the account number — they are usually the same and, when they are not, the delivery one
+     * is right.
+     */
+    const mobile = row.recipient_mobile
+      ? tenDigits(row.recipient_mobile)
+      : (tenDigits(row.address?.phone) ?? tenDigits(row.customer_phone))
     if (!mobile) return { sent: false, reason: "no_mobile" }
 
     if (!isProviderConfigured()) return { sent: false, reason: "provider_unconfigured" }
 
-    /**
-     * The variables every order template may use.
-     *
-     * Deliberately the same set for all of them: a DLT template picks the ones it registered and
-     * MSG91 ignores the rest, so a new approved template needs no code change here. Values are
-     * strings because that is what the flow endpoint takes.
-     */
     const result = await sendSms({
       mobile,
       providerTemplateId: row.provider_template_id,
-      variables: {
-        ORDER: String(row.display_id),
-        NAME: String(row.address?.first_name ?? "there"),
-        AMOUNT: String(Math.round(Number(row.payable_paise) / 100)),
-      },
+      variables: orderVariables(row),
     })
 
     await db.query(

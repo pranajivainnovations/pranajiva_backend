@@ -45,13 +45,49 @@ export type OrderStatus =
  * jumps from placed to delivered produces a timeline that cannot be read. Ops can still cancel at
  * any point, because that is the correction that actually comes up.
  */
-const NEXT: Record<OrderStatus, OrderStatus[]> = {
+const CROSSFRIEND_NEXT: Record<OrderStatus, OrderStatus[]> = {
   placed: ["accepted", "cancelled"],
   accepted: ["making", "cancelled"],
   making: ["out_for_delivery", "cancelled"],
   out_for_delivery: ["delivered", "cancelled"],
   delivered: [],
   cancelled: [],
+}
+
+/**
+ * ── Why PranaJiva has its own, shorter path ───────────────────────────────────────────────────
+ * The four CrossFriend steps exist because a cake is made to order by somebody else: `accepted`
+ * means a baker has taken it on, `making` means they have started. PranaJiva sells finished jars
+ * off a shelf. There is no baker to accept it and nothing to make, so those two steps would be a
+ * person clicking through screens to record events that did not happen — and `accepted` in
+ * particular would put "a baker has taken this on" in front of a customer who bought neem powder.
+ *
+ * What is left is what is actually true of a parcel: it was ordered, it went out, it arrived.
+ *
+ * ── Why no new status words ───────────────────────────────────────────────────────────────────
+ * A `packed` step was tempting and rejected. Three things read `orders.orders.status` — this map,
+ * the CHECK constraint, and the customer's own order page — and a new value means touching all
+ * three plus `notify_rules` to say something the customer cannot act on. Every status PranaJiva
+ * uses here is one all three already understand, and each one is accurate for a parcel without
+ * being relabelled.
+ */
+const PRANAJIVA_NEXT: Record<OrderStatus, OrderStatus[]> = {
+  placed: ["out_for_delivery", "cancelled"],
+  accepted: ["out_for_delivery", "cancelled"],
+  making: ["out_for_delivery", "cancelled"],
+  out_for_delivery: ["delivered", "cancelled"],
+  delivered: [],
+  cancelled: [],
+}
+
+/**
+ * `accepted` and `making` keep an exit on the PranaJiva map although nothing there can produce
+ * them. An order moved by hand in psql, or one placed before this split existed, would otherwise be
+ * stuck with no legal move at all — and a dead-ended order is a support problem that needs a
+ * developer rather than an operator.
+ */
+function transitionsFor(brand: string): Record<OrderStatus, OrderStatus[]> {
+  return brand === "pranajiva" ? PRANAJIVA_NEXT : CROSSFRIEND_NEXT
 }
 
 export class OpsOrderError extends Error {
@@ -146,7 +182,7 @@ export async function moveOrderStatus(input: {
   const db = getOrdersDbPool()
 
   const { rows } = await db.query(
-    `SELECT o.id, o.status, o.payment_method, o.payment_status,
+    `SELECT o.id, o.status, o.brand, o.payment_method, o.payment_status,
             (SELECT count(*)::int FROM orders.order_items i
               WHERE i.order_id = o.id AND i.baker_id IS NULL) AS unassigned
        FROM orders.orders o WHERE o.id = $1::uuid`,
@@ -155,7 +191,7 @@ export async function moveOrderStatus(input: {
   if (!rows.length) throw new OpsOrderError("not_found", "No such order.", 404)
 
   const from = rows[0].status as OrderStatus
-  const allowed = NEXT[from] ?? []
+  const allowed = transitionsFor(rows[0].brand)[from] ?? []
 
   if (!allowed.includes(input.next)) {
     throw new OpsOrderError(
@@ -167,7 +203,10 @@ export async function moveOrderStatus(input: {
     )
   }
 
-  if (input.next === "accepted" && rows[0].unassigned > 0) {
+  /* Only CrossFriend can reach `accepted` at all, so this is already unreachable for PranaJiva —
+     the brand is named anyway, because a gate about bakers should say which brand has bakers rather
+     than rely on a transition table two screens away to make it true. */
+  if (rows[0].brand !== "pranajiva" && input.next === "accepted" && rows[0].unassigned > 0) {
     throw new OpsOrderError(
       "no_baker",
       "Assign a baker before accepting — the customer is told a baker has taken this on.",
