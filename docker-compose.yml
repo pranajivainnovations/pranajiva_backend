@@ -121,6 +121,18 @@ services:
       RAZORPAY_ACCOUNT: ${RAZORPAY_ACCOUNT}
       RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET}
 
+      # Instagram automation (src/services/meta, webhook /hooks/meta).
+      #   IG_APP_SECRET           — the Meta app's secret (App Dashboard → App settings → Basic →
+      #                             App secret). Verifies every webhook and signs every Graph call
+      #                             (appsecret_proof); unset, the webhook refuses all deliveries.
+      #   IG_WEBHOOK_VERIFY_TOKEN — any long random string; the same value goes in the Meta
+      #                             dashboard's "Verify token" box when saving the callback URL.
+      # The System User access token is NOT here: it is pasted on the OPS Instagram settings screen
+      # and stored sealed in the database, so it can be replaced without touching the server.
+      # The AI comment triage uses ANTHROPIC_API_KEY, already set above.
+      IG_APP_SECRET: ${IG_APP_SECRET}
+      IG_WEBHOOK_VERIFY_TOKEN: ${IG_WEBHOOK_VERIFY_TOKEN}
+
 
     restart: unless-stopped
 
@@ -144,6 +156,16 @@ services:
       NEXT_PUBLIC_MEDUSA_BACKEND_URL: ${NEXT_PUBLIC_MEDUSA_BACKEND_URL:-http://13.60.27.11:9001}
       NEXT_PUBLIC_SANITY_PROJECT_ID: ${NEXT_PUBLIC_SANITY_PROJECT_ID:-5ehhoj92}
       NEXT_PUBLIC_SANITY_DATASET: ${NEXT_PUBLIC_SANITY_DATASET:-production}
+      # Tracker (pranajiva.in/tracker). Its tables are the tracker schema in the shop database
+      # for now; moving them to a database of their own later means changing only this line.
+      TRACKER_DATABASE_URL: ${DATABASE_URL}
+      # Random keys, kept in .env. Losing TRACKER_ENC_KEY makes saved tracker data unreadable.
+      TRACKER_SESSION_SECRET: ${TRACKER_SESSION_SECRET}
+      TRACKER_ENC_KEY: ${TRACKER_ENC_KEY}
+      TRACKER_ENC_KEY_ID: ${TRACKER_ENC_KEY_ID:-k1}
+      # Tracker phone reminders (web push). Without these the site runs; reminders stay off.
+      TRACKER_VAPID_PUBLIC_KEY: ${TRACKER_VAPID_PUBLIC_KEY}
+      TRACKER_VAPID_PRIVATE_KEY: ${TRACKER_VAPID_PRIVATE_KEY}
       # NEXT_PUBLIC_RAZORPAY_KEY_ID is deliberately gone: the storefront now reads
       # the key from the backend at runtime, so there is one copy of it and it
       # lives on the service above.
