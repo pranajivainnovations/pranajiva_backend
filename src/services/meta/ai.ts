@@ -104,11 +104,13 @@ export interface CommentReading {
   reply: string | null
 }
 
-const TOOL = {
-  name: "record_comment_reading",
-  description: "Record how this Instagram comment should be handled, and a reply draft.",
-  input_schema: {
+/**
+ * The answer's shape, enforced by the API (structured outputs). Current models (Opus 5.5, Sonnet 5.5)
+ * refuse a forced tool call, so the reading comes back as schema-valid JSON text instead.
+ */
+const READING_SCHEMA = {
     type: "object",
+    additionalProperties: false,
     properties: {
       category: {
         type: "string",
@@ -129,18 +131,17 @@ const TOOL = {
         description: "true if a person at PranaJiva should read this before anything is posted.",
       },
       intent_campaign_id: {
-        type: ["string", "null"],
+        anyOf: [{ type: "string" }, { type: "null" }],
         description: "The id of the intent campaign this comment is clearly asking for, or null. Only ids from the list given.",
       },
       reason: { type: "string", description: "One short sentence, for the operator, on why." },
       reply: {
-        type: ["string", "null"],
+        anyOf: [{ type: "string" }, { type: "null" }],
         description:
           "A public reply draft, or null for spam/abuse or when asked not to draft. At most 220 characters, at most one emoji, no hashtags, no links, no prices, no medical advice.",
       },
     },
     required: ["category", "sentiment", "risk", "language", "needs_human", "intent_campaign_id", "reason", "reply"],
-  },
 }
 
 function systemPrompt(settings: AutomationSettings, draft: boolean): string {
@@ -201,10 +202,11 @@ export async function readComment(input: {
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       body: JSON.stringify({
         model: input.settings.aiModel,
-        max_tokens: 800,
+        // Thinking is on by default on current models and counts towards max_tokens; low effort keeps
+        // a one-comment triage quick and cheap while leaving room for the JSON answer.
+        max_tokens: 4000,
+        output_config: { effort: "low", format: { type: "json_schema", schema: READING_SCHEMA } },
         system: systemPrompt(input.settings, input.draft),
-        tools: [TOOL],
-        tool_choice: { type: "tool", name: TOOL.name },
         messages: [{ role: "user", content: user }],
       }),
       signal: controller.signal,
@@ -217,8 +219,18 @@ export async function readComment(input: {
   if (!response.ok) {
     throw new Error(`Claude answered ${response.status}: ${json?.error?.message ?? "unknown error"}`)
   }
-  const block = (json?.content ?? []).find((b: any) => b?.type === "tool_use")
-  const r = block?.input
+  if (json?.stop_reason === "refusal") throw new Error("Claude declined to read this comment.")
+  if (json?.stop_reason === "max_tokens") throw new Error("Claude ran out of room before answering.")
+  const text = (json?.content ?? [])
+    .filter((b: any) => b?.type === "text")
+    .map((b: any) => String(b.text ?? ""))
+    .join("")
+  let r: any = null
+  try {
+    r = JSON.parse(text)
+  } catch {
+    r = null
+  }
   if (!r || !(CATEGORIES as readonly string[]).includes(r.category)) throw new Error("Claude returned no reading.")
 
   const intentIds = new Set(input.intents.map((i) => i.id))
