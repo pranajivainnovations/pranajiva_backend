@@ -26,6 +26,14 @@ import {
   testReading,
 } from "../../../services/meta/automation"
 import { isMissingSchema } from "../../../services/meta/db"
+import {
+  addCompetitor,
+  probeAccess,
+  removeCompetitor,
+  startContentIdeas,
+  syncCompetitors,
+  syncInsights,
+} from "../../../services/meta/insights"
 import { isValidOpsServiceKey, OPS_SERVICE_KEY_HEADER } from "../../../services/baker-portal/ops-service-auth"
 
 /**
@@ -186,12 +194,31 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
       case "test_reading":
         res.json(await testReading(id("accountId"), String(body.text ?? ""), body.mediaId ? String(body.mediaId) : undefined))
         return
+      case "access_check":
+        res.json({ report: await probeAccess(id("accountId"), opsUserId, body.testHandle ? String(body.testHandle) : undefined) })
+        return
+      case "insights_sync":
+        res.json({ result: await syncInsights(id("accountId"), opsUserId) })
+        return
+      case "competitor_add":
+        res.json({ competitor: await addCompetitor(id("accountId"), String(body.username ?? ""), String(body.note ?? ""), opsUserId) })
+        return
+      case "competitor_remove":
+        await removeCompetitor(id("accountId"), id("competitorId"))
+        res.json({ ok: true })
+        return
+      case "competitor_sync":
+        res.json({ result: await syncCompetitors(id("accountId")) })
+        return
+      case "ideas_start":
+        res.json(await startContentIdeas(id("accountId"), opsUserId))
+        return
       default:
         res.status(400).json({ error: "Unknown action." })
     }
   } catch (error) {
     if (isMissingSchema(error)) {
-      res.status(503).json({ error: "The Meta tables are not installed yet. Apply migration 1729400000000-CreateMetaIntegrations." })
+      res.status(503).json({ error: "The Meta tables are not installed yet. Apply the backend Meta migrations (1729400000000 onwards)." })
       return
     }
     if (error instanceof IgError) {

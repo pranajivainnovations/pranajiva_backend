@@ -292,3 +292,13 @@ export function verifyMetaSignature(rawBody: string, header: string | undefined,
   if (given.length !== expected.length || !/^[0-9a-f]+$/i.test(given)) return false
   return timingSafeEqual(Buffer.from(given, "hex"), Buffer.from(expected, "hex"))
 }
+
+/* ── Reading (analytics, competitors) ──────────────────────────────────────────────────────── */
+
+/**
+ * A plain read against the Graph API, for insights, Business Discovery and the access check.
+ * GET only: nothing that goes through here can change anything on Instagram.
+ */
+export function graphGet<T = any>(path: string, token: string): Promise<T> {
+  return call<T>("GET", path, token)
+}

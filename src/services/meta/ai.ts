@@ -258,3 +258,53 @@ export async function readComment(input: {
     model: String(json?.model ?? input.settings.aiModel),
   }
 }
+
+/**
+ * One structured-output request for the longer analyses (content ideas). The same raw-HTTP pattern
+ * as readComment, with room to think: medium effort, a larger budget and a longer timeout.
+ */
+export async function askClaudeJson<T = any>(input: {
+  model: string
+  system: string
+  user: string
+  schema: Record<string, unknown>
+  maxTokens?: number
+  timeoutMs?: number
+}): Promise<{ result: T; model: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) throw new AiUnavailable("ANTHROPIC_API_KEY is not set on the backend.")
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), input.timeoutMs ?? 240_000)
+  let response: Response
+  try {
+    response = await fetch(ANTHROPIC_API_URL, {
+      method: "POST",
+      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: input.model,
+        max_tokens: input.maxTokens ?? 16000,
+        output_config: { effort: "medium", format: { type: "json_schema", schema: input.schema } },
+        system: input.system,
+        messages: [{ role: "user", content: input.user }],
+      }),
+      signal: controller.signal,
+    })
+  } catch (error) {
+    throw new Error(controller.signal.aborted ? "Claude took too long to answer." : `Could not reach Claude (${error instanceof Error ? error.message : error}).`)
+  } finally {
+    clearTimeout(timer)
+  }
+  const json = (await response.json().catch(() => ({}))) as any
+  if (!response.ok) throw new Error(`Claude answered ${response.status}: ${json?.error?.message ?? "unknown error"}`)
+  if (json?.stop_reason === "refusal") throw new Error("Claude declined this request.")
+  if (json?.stop_reason === "max_tokens") throw new Error("Claude ran out of room before finishing.")
+  const text = (json?.content ?? [])
+    .filter((b: any) => b?.type === "text")
+    .map((b: any) => String(b.text ?? ""))
+    .join("")
+  try {
+    return { result: JSON.parse(text) as T, model: String(json?.model ?? input.model) }
+  } catch {
+    throw new Error("Claude returned no usable answer.")
+  }
+}

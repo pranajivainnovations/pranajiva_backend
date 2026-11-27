@@ -66,7 +66,7 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
 /* ── Logging ───────────────────────────────────────────────────────────────────────────────── */
 
-async function logExec(
+export async function logExec(
   accountId: string,
   step: string,
   ref: { campaignId?: string | null; commentRowId?: string | null; queueId?: string | null; detail?: string | null } = {}
@@ -91,7 +91,7 @@ async function logEvent(accountExternalId: string | null, field: string | null, 
 
 /* ── Accounts and credentials ──────────────────────────────────────────────────────────────── */
 
-interface AccountRow {
+export interface AccountRow {
   id: string
   workspace_id: string
   platform: string
@@ -102,7 +102,7 @@ interface AccountRow {
   settings: unknown
 }
 
-async function account(id: string): Promise<AccountRow> {
+export async function account(id: string): Promise<AccountRow> {
   const { rows } = await metaDb().query(`SELECT * FROM meta.accounts WHERE id = $1`, [id])
   if (!rows[0]) throw new IgError("That account is not connected.", 404)
   return rows[0]
@@ -144,7 +144,7 @@ async function setCredential(
   }
 }
 
-async function systemToken(a: AccountRow): Promise<string> {
+export async function systemToken(a: AccountRow): Promise<string> {
   const t = a.status === "disconnected" ? null : await credential(a.id, "system_user_token")
   if (!t) throw new IgError(`@${a.username} is not connected. Paste the access token in Instagram settings.`)
   return t
@@ -163,7 +163,7 @@ async function commentToken(a: AccountRow): Promise<string> {
   return (await pageOf(a))?.token ?? systemToken(a)
 }
 
-async function markTokenDead(accountId: string, message: string) {
+export async function markTokenDead(accountId: string, message: string) {
   await metaDb().query(`UPDATE meta.accounts SET status = 'expired', last_error = $2, updated_at = NOW() WHERE id = $1`, [
     accountId,
     message.slice(0, 500),
@@ -360,7 +360,7 @@ export async function saveSettings(accountId: string, input: unknown): Promise<A
 
 /* ── Media (the context the AI reads) ──────────────────────────────────────────────────────── */
 
-async function upsertMedia(accountId: string, m: { id: string; caption?: string; permalink?: string; media_type?: string; media_product_type?: string; thumbnail_url?: string; media_url?: string; timestamp?: string }) {
+export async function upsertMedia(accountId: string, m: { id: string; caption?: string; permalink?: string; media_type?: string; media_product_type?: string; thumbnail_url?: string; media_url?: string; timestamp?: string }) {
   await metaDb().query(
     `INSERT INTO meta.media (account_id, external_id, caption, permalink, media_type, product_type, thumbnail_url, posted_at, fetched_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
