@@ -2,7 +2,8 @@
  * Reading a comment the way a good community manager would — and drafting the reply.
  *
  * One Claude call per comment does all of it: what kind of comment this is, how risky a public
- * answer would be, whether a person must handle it, which intent campaign (if any) it is asking for,
+ * answer would be, whether a person must handle it, which live campaign (if any) it is asking for —
+ * on any post, not only the ones the campaign runs on —
  * and a reply in the brand's voice. One call rather than a chain because every step needs the same
  * context (the post, the brand, the comment) and a chain would pay for that context three times.
  *
@@ -15,7 +16,7 @@
  *   automatic answer — automation.ts enforces that whatever the model says.
  *
  * Raw HTTP to the Messages API, like the rest of this backend (ai-image/horoscope-quote.ts); the
- * reply comes back through a forced tool call, so it is always the shape below or an error.
+ * reply comes back as structured output, so it is always the shape below or an error.
  */
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -132,7 +133,8 @@ const READING_SCHEMA = {
       },
       intent_campaign_id: {
         anyOf: [{ type: "string" }, { type: "null" }],
-        description: "The id of the intent campaign this comment is clearly asking for, or null. Only ids from the list given.",
+        description:
+          "The id of the live campaign whose resource this comment is asking for — on this post or any other, spelling mistakes and other languages included — or null. Only ids from the list given.",
       },
       reason: { type: "string", description: "One short sentence, for the operator, on why." },
       reply: {
@@ -157,6 +159,7 @@ function systemPrompt(settings: AutomationSettings, draft: boolean): string {
     "- Understand Hindi, English and Hinglish (Hindi written in Roman letters), including typos and slang: 'pdf bhejo', 'mujhe bhi chahiye', 'link plz', 'कैलेंडर भेजिए' are all requests.",
     "- Health: anyone describing symptoms, a condition, medicines, pregnancy, or asking what to take is health_sensitive, risk high, needs_human true. Any draft only thanks them and says the team will reply personally — no advice, no diagnosis, no product suggestion.",
     "- Complaints are never argued with in public: acknowledge, apologise for the trouble, say the team will reach out. needs_human true.",
+    "- LIVE CAMPAIGNS are the free things PranaJiva is giving away right now (a PDF, a calendar, a guide). If the comment asks for one of them — even on a different post, misspelt ('calander', 'calender'), in Hindi, or indirectly ('mujhe bhi', 'kaise milega', 'where do I get the chart') — set intent_campaign_id to it. The campaign sends the link by DM; your draft never contains it.",
     "- Spam and abuse get no reply (reply null).",
     "- Never invent facts about products, prices, delivery or offers. Never include links. Never promise cures.",
     "- Keep replies short, natural and specific to what they said — not a template.",
@@ -183,10 +186,10 @@ export async function readComment(input: {
     `POST CAPTION:\n${(input.caption || "(no caption)").slice(0, 2000)}`,
     input.postNote ? `OPERATOR NOTE ABOUT THIS POST:\n${input.postNote.slice(0, 1500)}` : null,
     input.intents.length
-      ? `INTENT CAMPAIGNS (pick one only if the comment clearly asks for it):\n${input.intents
-          .map((i) => `- id ${i.id}: ${i.description.slice(0, 400)}`)
+      ? `LIVE CAMPAIGNS (pick one only if the comment asks for what it offers):\n${input.intents
+          .map((i) => `- id ${i.id}: ${i.description.slice(0, 600)}`)
           .join("\n")}`
-      : "INTENT CAMPAIGNS: none",
+      : "LIVE CAMPAIGNS: none",
     input.isReplyToAnother ? "NOTE: this comment is a reply inside another person's comment thread." : null,
     `COMMENT by @${input.commenter || "unknown"}:\n<comment>\n${input.comment.slice(0, 2000)}\n</comment>`,
   ]

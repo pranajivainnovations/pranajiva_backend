@@ -11,6 +11,7 @@ import {
   IgError,
   markConversationRead,
   redraft,
+  rereadFailed,
   retryQueue,
   saveCampaign,
   saveMediaNote,
@@ -152,6 +153,12 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
       case "inbox_redraft":
         res.json({ reading: await redraft(id("commentId")) })
         return
+      case "inbox_reread": {
+        const r = await rereadFailed(id("accountId"), body.commentId ? id("commentId") : undefined)
+        r.queue.forEach(sendNow)
+        res.json({ count: r.count })
+        return
+      }
       case "conversation_send":
         sendNow(await sendInConversation(id("conversationId"), String(body.text ?? ""), opsUserId))
         res.json({ ok: true })

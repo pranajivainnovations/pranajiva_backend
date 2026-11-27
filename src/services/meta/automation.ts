@@ -637,6 +637,42 @@ async function liveCampaigns(accountId: string, kind: TriggerKind, mediaId: stri
   return rows
 }
 
+/**
+ * Every live campaign that gives something away (a DM or a reply), on any post — what the AI may
+ * hand out when a comment asks for it. Wider than the triggers on purpose: someone who writes
+ * "calander kaise milega?" under a different reel is asking for the calendar all the same. Campaigns
+ * on this post come first; a new campaign is included the moment it goes live.
+ */
+async function offerCampaigns(accountId: string, mediaId: string | null): Promise<(CampaignRow & { on_this_post: boolean })[]> {
+  const { rows } = await metaDb().query(
+    `SELECT c.*, 'word' AS match_mode,
+            COALESCE((SELECT array_agg(DISTINCT k) FROM meta.campaign_triggers t, unnest(t.keywords) k WHERE t.campaign_id = c.id), '{}') AS keywords,
+            (SELECT string_agg(t.intent, ' / ') FROM meta.campaign_triggers t WHERE t.campaign_id = c.id AND COALESCE(t.intent, '') <> '') AS intent,
+            (c.media_ids IS NULL OR $2::text = ANY(c.media_ids)) AS on_this_post,
+            COALESCE((SELECT json_object_agg(a.kind, a.texts) FROM meta.campaign_actions a WHERE a.campaign_id = c.id), '{}'::json) AS actions
+       FROM meta.campaigns c
+      WHERE c.account_id = $1 AND c.status = 'active'
+        AND (c.starts_at IS NULL OR c.starts_at <= NOW()) AND (c.ends_at IS NULL OR c.ends_at > NOW())
+        AND EXISTS (SELECT 1 FROM meta.campaign_actions a WHERE a.campaign_id = c.id AND a.kind IN ('dm', 'reply'))
+      ORDER BY on_this_post DESC, c.priority, c.created_at
+      LIMIT 25`,
+    [accountId, mediaId]
+  )
+  return rows
+}
+
+function describeOffer(c: CampaignRow & { on_this_post: boolean }): string {
+  return [
+    c.name,
+    c.resource_name ? `Gives: ${c.resource_name}.` : null,
+    c.intent ? `For people who: ${c.intent}.` : null,
+    c.keywords.length ? `People ask with words like: ${c.keywords.slice(0, 12).join(", ")}.` : null,
+    c.on_this_post ? "Runs on this post." : "Runs on other posts — still the right answer if they ask for it here.",
+  ]
+    .filter(Boolean)
+    .join(" ")
+}
+
 /* ── Webhook intake ────────────────────────────────────────────────────────────────────────── */
 
 export interface IntakeResult {
@@ -972,7 +1008,7 @@ export async function triageComment(commentRowId: string): Promise<string[]> {
     return []
   }
 
-  const intents = comment.campaign_id ? [] : await liveCampaigns(a.id, "intent", comment.media_id)
+  const intents = comment.campaign_id ? [] : await offerCampaigns(a.id, comment.media_id)
   const anyComment = comment.campaign_id ? [] : await liveCampaigns(a.id, "any_comment", comment.media_id)
   const ctx = await mediaContext(a, comment.media_id)
 
@@ -985,7 +1021,7 @@ export async function triageComment(commentRowId: string): Promise<string[]> {
       caption: ctx.caption,
       postNote: ctx.note,
       isReplyToAnother: Boolean(comment.parent_id),
-      intents: intents.map((c) => ({ id: c.id, description: c.intent ?? c.name })),
+      intents: intents.map((c) => ({ id: c.id, description: describeOffer(c) })),
       draft: settings.replyMode !== "manual" && !comment.campaign_id,
     })
   } catch (error) {
@@ -1168,7 +1204,8 @@ export async function redraft(commentRowId: string) {
     `UPDATE meta.comments
         SET ai_status = 'done', ai_category = $2, ai_sentiment = $3, ai_risk = $4, ai_language = $5, ai_needs_human = $6,
             ai_reason = $7, ai_draft = $8, ai_model = $9, ai_at = NOW(),
-            status = CASE WHEN status = 'new' THEN 'awaiting_approval' ELSE status END
+            status = CASE WHEN status = 'new' THEN 'awaiting_approval' ELSE status END,
+            note = CASE WHEN note LIKE 'AI reading failed:%' OR note LIKE 'Daily AI limit%' THEN NULL ELSE note END
       WHERE id = $1`,
     [comment.id, reading.category, reading.sentiment, reading.risk, reading.language, reading.needsHuman, reading.reason, reading.reply, reading.model]
   )
@@ -1176,11 +1213,39 @@ export async function redraft(commentRowId: string) {
   return reading
 }
 
+/**
+ * Comments the AI could not read — the key was wrong, Claude was down, the daily limit ran out —
+ * go through the full reading again, campaigns included, as if they had just arrived. One comment,
+ * or every open one on the account. The first 20 are read now; the minute sweep takes the rest.
+ */
+export async function rereadFailed(accountId: string, commentRowId?: string): Promise<{ count: number; queue: string[] }> {
+  const { rows } = await metaDb().query(
+    `UPDATE meta.comments
+        SET ai_status = 'pending', ai_attempts = 0,
+            note = CASE WHEN note LIKE 'AI reading failed:%' OR note LIKE 'Daily AI limit%' THEN NULL ELSE note END
+      WHERE account_id = $1 AND ai_status IN ('failed', 'skipped')
+        AND status IN ('new', 'needs_human', 'awaiting_approval')
+        AND ($2::uuid IS NULL OR id = $2::uuid)
+      RETURNING id`,
+    [accountId, commentRowId ?? null]
+  )
+  const queue: string[] = []
+  for (const row of rows.slice(0, 20)) {
+    try {
+      queue.push(...(await triageComment(row.id)))
+    } catch (error) {
+      console.error(`[meta] reread ${row.id}: ${error instanceof Error ? error.message : error}`)
+    }
+  }
+  if (rows.length) await logExec(accountId, "ai_reread", { detail: `${rows.length} comment(s)` })
+  return { count: rows.length, queue }
+}
+
 /** The settings screen's "try a comment" box: what would happen, nothing stored or sent. */
 export async function testReading(accountId: string, text: string, mediaId?: string) {
   const a = await account(accountId)
   const ctx = await mediaContext(a, mediaId || null)
-  const intents = await liveCampaigns(a.id, "intent", mediaId || null)
+  const intents = await offerCampaigns(a.id, mediaId || null)
   const reading = await readComment({
     settings: mergeSettings(a.settings),
     comment: String(text ?? "").slice(0, 2000),
@@ -1188,7 +1253,7 @@ export async function testReading(accountId: string, text: string, mediaId?: str
     caption: ctx.caption,
     postNote: ctx.note,
     isReplyToAnother: false,
-    intents: intents.map((c) => ({ id: c.id, description: c.intent ?? c.name })),
+    intents: intents.map((c) => ({ id: c.id, description: describeOffer(c) })),
     draft: true,
   })
   const keywordHit = (await liveCampaigns(a.id, "keyword", mediaId || null)).find((c) => matchKeyword(text, c.keywords, c.match_mode))
