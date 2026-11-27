@@ -215,6 +215,34 @@ export function getMedia(mediaId: string, token: string): Promise<IgMedia> {
   return call<IgMedia>("GET", `/${encodeURIComponent(mediaId)}?fields=${MEDIA_FIELDS}`, token)
 }
 
+export interface IgComment {
+  id: string
+  text?: string
+  timestamp?: string
+  username?: string
+  from?: { id: string; username?: string }
+}
+
+/**
+ * The top-level comments already on a post, newest first, page by page up to `max`. Used to catch
+ * up on comments that arrived before a campaign existed (webhooks only bring new ones).
+ */
+export async function listComments(mediaId: string, token: string, max = 2000): Promise<IgComment[]> {
+  const out: IgComment[] = []
+  let after: string | null = null
+  while (out.length < max) {
+    const page: { data?: IgComment[]; paging?: { cursors?: { after?: string }; next?: string } } = await call(
+      "GET",
+      `/${encodeURIComponent(mediaId)}/comments?fields=id,text,timestamp,username,from&limit=50${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+      token
+    )
+    out.push(...(page.data ?? []))
+    after = page.paging?.next ? page.paging?.cursors?.after ?? null : null
+    if (!after || !page.data?.length) break
+  }
+  return out.slice(0, max)
+}
+
 /* ── Responding ────────────────────────────────────────────────────────────────────────────── */
 
 /**

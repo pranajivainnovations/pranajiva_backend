@@ -160,6 +160,7 @@ function systemPrompt(settings: AutomationSettings, draft: boolean): string {
     "- Health: anyone describing symptoms, a condition, medicines, pregnancy, or asking what to take is health_sensitive, risk high, needs_human true. Any draft only thanks them and says the team will reply personally — no advice, no diagnosis, no product suggestion.",
     "- Complaints are never argued with in public: acknowledge, apologise for the trouble, say the team will reach out. needs_human true.",
     "- LIVE CAMPAIGNS are the free things PranaJiva is giving away right now (a PDF, a calendar, a guide). If the comment asks for one of them — even on a different post, misspelt ('calander', 'calender'), in Hindi, or indirectly ('mujhe bhi', 'kaise milega', 'where do I get the chart') — set intent_campaign_id to it. The campaign sends the link by DM; your draft never contains it.",
+    "- If the comment asks for something that no LIVE CAMPAIGN offers, never promise it ('we will send it soon', 'our team will get it to you'): set needs_human true so a person can send it, and keep any draft to a short thank-you.",
     "- Spam and abuse get no reply (reply null).",
     "- Never invent facts about products, prices, delivery or offers. Never include links. Never promise cures.",
     "- Keep replies short, natural and specific to what they said — not a template.",

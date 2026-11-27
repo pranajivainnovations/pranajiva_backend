@@ -5,7 +5,9 @@ import {
   getMedia,
   hideComment,
   IgApiError,
+  type IgComment,
   inspectToken,
+  listComments,
   listMedia,
   replyToComment,
   sendMessage,
@@ -461,7 +463,7 @@ interface CampaignRow {
   keywords: string[]
   intent: string | null
   /* kind → message versions; hide has none. */
-  actions: { dm?: string[]; reply?: string[]; hide?: string[] }
+  actions: { dm?: string[]; reply?: string[]; hide?: string[]; late?: string[] }
 }
 
 interface TriggerInput {
@@ -508,12 +510,14 @@ export async function saveCampaign(input: Record<string, any> & { accountId: str
   const hide = input.hideAfter === true
   if (respond !== "reply" && !dmTexts.length) throw new IgError("Write at least one DM message.")
   if (respond !== "dm" && !replyTexts.length) throw new IgError("Write at least one public reply.")
+  /* For comments older than 7 days, when a DM is no longer allowed: invite them to message the keyword. */
+  const lateTexts = respond === "reply" ? [] : cleanTemplates(input.lateReplyTemplates, 15, 300)
 
   const linkUrl = String(input.linkUrl ?? "").trim() || null
   const resourceName = String(input.resourceName ?? "").trim().slice(0, 160) || null
   if (linkUrl && !/^https:\/\/[^\s]+$/i.test(linkUrl)) throw new IgError("The link must start with https://")
   if ([...dmTexts, ...replyTexts].some((t) => t.includes("{link}")) && !linkUrl) throw new IgError("A message uses {link} but no link is set.")
-  if (replyTexts.some((t) => /https?:\/\//i.test(t) || t.includes("{link}")))
+  if ([...replyTexts, ...lateTexts].some((t) => /https?:\/\//i.test(t) || t.includes("{link}")))
     throw new IgError("Keep links out of public replies — Instagram treats links in comments as spam. Put them in the DM.")
 
   const starts = input.startsAt ? new Date(input.startsAt) : null
@@ -562,6 +566,7 @@ export async function saveCampaign(input: Record<string, any> & { accountId: str
     let position = 1
     if (dmTexts.length) await db.query(`INSERT INTO meta.campaign_actions (campaign_id, kind, position, texts) VALUES ($1, 'dm', $2, $3)`, [id, position++, dmTexts])
     if (replyTexts.length) await db.query(`INSERT INTO meta.campaign_actions (campaign_id, kind, position, texts) VALUES ($1, 'reply', $2, $3)`, [id, position++, replyTexts])
+    if (lateTexts.length) await db.query(`INSERT INTO meta.campaign_actions (campaign_id, kind, position, texts) VALUES ($1, 'late', $2, $3)`, [id, position++, lateTexts])
     if (hide) await db.query(`INSERT INTO meta.campaign_actions (campaign_id, kind, position) VALUES ($1, 'hide', $2)`, [id, position++])
     await db.query("COMMIT")
     await logExec(input.accountId, input.campaignId ? "campaign_updated" : "campaign_created", { campaignId: id, detail: `${name} (${status})` })
@@ -621,8 +626,211 @@ export async function duplicateCampaign(id: string, opsUserId: string) {
   }
 }
 
+/* ── Catching up on earlier comments ───────────────────────────────────────────────────────── */
+
+async function campaignById(id: string): Promise<CampaignRow & { status: string; kinds: string[] }> {
+  const { rows } = await metaDb().query(
+    `SELECT c.*, COALESCE(kt.match_mode, 'word') AS match_mode, COALESCE(kt.keywords, '{}') AS keywords, it.intent,
+            (SELECT array_agg(t.kind) FROM meta.campaign_triggers t WHERE t.campaign_id = c.id) AS kinds,
+            COALESCE((SELECT json_object_agg(a.kind, a.texts) FROM meta.campaign_actions a WHERE a.campaign_id = c.id), '{}'::json) AS actions
+       FROM meta.campaigns c
+       LEFT JOIN meta.campaign_triggers kt ON kt.campaign_id = c.id AND kt.kind = 'keyword'
+       LEFT JOIN meta.campaign_triggers it ON it.campaign_id = c.id AND it.kind = 'intent'
+      WHERE c.id = $1`,
+    [id]
+  )
+  if (!rows[0]) throw new IgError("That campaign no longer exists.", 404)
+  return { ...rows[0], kinds: rows[0].kinds ?? [] }
+}
+
+export interface CatchUpSummary {
+  fetched: number
+  matched: number
+  matchedRecent: number
+  matchedOld: number
+  oldWithoutDm: number
+  alreadyAnswered: number
+  forAi: number
+  examples: { username: string | null; text: string; daysAgo: number }[]
+  running: boolean
+}
+
+const catchUpRunning = new Set<string>()
+
+/**
+ * The comments already on a post, checked against one campaign — for a reel that collected
+ * "calendar" comments before the campaign existed. Preview counts what would happen; start does it,
+ * in the background, spacing the sends 15–45 seconds apart so the replies read like a person working
+ * through them rather than a burst (which Instagram also treats as spam).
+ *
+ *   keyword match (typos included)  → the campaign's DM + reply, as if the comment had just arrived
+ *   older than 7 days               → no DM is allowed: the "late" reply invites them to message the
+ *                                     keyword, and the DM keyword automation answers there
+ *   anything else, AI on            → the AI decides whether it asks for this campaign
+ *   already answered / ours         → left alone, so running it twice sends nothing twice
+ */
+export async function catchUpComments(input: { campaignId: string; mediaId: string; start: boolean; useAi: boolean }): Promise<CatchUpSummary> {
+  const c = await campaignById(input.campaignId)
+  if (c.kinds.includes("any_comment")) throw new IgError("Catch-up is for keyword and intent campaigns. DMing every earlier commenter would read as spam.")
+  if (!c.actions.dm?.length && !c.actions.reply?.length) throw new IgError("This campaign sends nothing to catch up with.")
+  if (input.start && c.status !== "active") throw new IgError("Activate the campaign first — catch-up sends what the live campaign sends.")
+  if (!/^\d{5,30}$/.test(input.mediaId)) throw new IgError("Pick the post to catch up on.")
+  if (catchUpRunning.has(c.id)) throw new IgError("A catch-up for this campaign is already running. Its progress is in the activity log below.")
+
+  const a = await account(c.account_id)
+  const settings = mergeSettings(a.settings)
+  let comments
+  try {
+    comments = await listComments(input.mediaId, await systemToken(a), 2000)
+  } catch (error) {
+    if (error instanceof IgApiError && error.tokenInvalid) await markTokenDead(a.id, error.message)
+    throw new IgError(`Could not load the comments from Instagram: ${error instanceof Error ? error.message : error}`)
+  }
+
+  const ids = comments.map((x) => x.id)
+  const { rows: known } = await metaDb().query(
+    `SELECT m.comment_id FROM meta.comments m
+      WHERE m.account_id = $1 AND m.comment_id = ANY($2)
+        AND (m.campaign_id IS NOT NULL OR m.status IN ('replied', 'hidden', 'dismissed', 'spam')
+             OR EXISTS (SELECT 1 FROM meta.response_queue q WHERE q.account_id = m.account_id AND q.target_id = m.comment_id
+                         AND q.kind IN ('dm', 'reply') AND q.status IN ('pending', 'sending', 'sent')))`,
+    [a.id, ids]
+  )
+  const done = new Set(known.map((r) => r.comment_id))
+
+  const summary: CatchUpSummary = { fetched: comments.length, matched: 0, matchedRecent: 0, matchedOld: 0, oldWithoutDm: 0, alreadyAnswered: 0, forAi: 0, examples: [], running: false }
+  const hits: { comment: (typeof comments)[number]; keyword: string }[] = []
+  const rest: typeof comments = []
+  for (const x of comments) {
+    const fromId = x.from?.id ?? ""
+    if (!fromId || fromId === a.external_id) continue
+    if (done.has(x.id)) {
+      summary.alreadyAnswered++
+      continue
+    }
+    const keyword = c.keywords.length ? matchKeyword(x.text ?? "", c.keywords, c.match_mode) : null
+    if (keyword) hits.push({ comment: x, keyword })
+    else if ((x.text ?? "").trim()) rest.push(x)
+  }
+  const isOld = (x: { timestamp?: string }) => Date.now() - new Date(x.timestamp ?? Date.now()).getTime() > SEVEN_DAYS_MS - 60 * 60_000
+  summary.matched = hits.length
+  summary.matchedOld = hits.filter((h) => isOld(h.comment)).length
+  summary.matchedRecent = summary.matched - summary.matchedOld
+  summary.oldWithoutDm = c.actions.late?.length ? 0 : summary.matchedOld
+  summary.forAi = settings.aiEnabled ? Math.min(rest.length, 400) : 0
+  summary.examples = hits.slice(0, 6).map((h) => ({
+    username: h.comment.from?.username ?? h.comment.username ?? null,
+    text: (h.comment.text ?? "").slice(0, 120),
+    daysAgo: Math.floor((Date.now() - new Date(h.comment.timestamp ?? Date.now()).getTime()) / 86_400_000),
+  }))
+  if (!input.start) return summary
+
+  catchUpRunning.add(c.id)
+  summary.running = true
+  await logExec(a.id, "catchup_started", {
+    campaignId: c.id,
+    detail: `${summary.fetched} comments on ${input.mediaId}: ${summary.matched} asked by keyword${input.useAi && summary.forAi ? `, ${summary.forAi} for the AI to read` : ""}`,
+  })
+  void runCatchUp(a, c, input.mediaId, hits, input.useAi && settings.aiEnabled ? rest.slice(0, 400) : [], settings)
+    .catch((error) => console.error(`[meta] catch-up ${c.id}: ${error instanceof Error ? error.message : error}`))
+    .finally(() => catchUpRunning.delete(c.id))
+  return summary
+}
+
+async function runCatchUp(
+  a: AccountRow,
+  c: CampaignRow,
+  mediaId: string,
+  hits: { comment: IgComment; keyword: string }[],
+  forAi: IgComment[],
+  settings: AutomationSettings
+) {
+  let at = Date.now()
+  let answered = 0
+  let stoppedAtCap = false
+  const ctx = forAi.length ? await mediaContext(a, mediaId) : { caption: null, note: null }
+
+  const store = async (x: IgComment): Promise<CommentRow> => {
+    const { rows } = await metaDb().query(
+      `INSERT INTO meta.comments (account_id, comment_id, media_id, commenter_id, commenter_username, text, commented_at)
+       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::timestamptz, NOW()))
+       ON CONFLICT (account_id, comment_id) DO UPDATE SET commented_at = LEAST(meta.comments.commented_at, EXCLUDED.commented_at)
+       RETURNING *`,
+      [a.id, x.id, mediaId, x.from!.id, (x.from?.username ?? x.username ?? null)?.slice(0, 255) ?? null, String(x.text ?? "").slice(0, 2200), x.timestamp ?? null]
+    )
+    return rows[0]
+  }
+  /* Stops before the daily DM limit rather than marking the rest "limit reached" for good: a second run tomorrow picks them up. */
+  const capLeft = async () => {
+    const { rows } = await metaDb().query(
+      `SELECT COUNT(*)::int AS n FROM meta.response_queue WHERE campaign_id = $1 AND kind = 'dm' AND created_at > NOW() - INTERVAL '24 hours'`,
+      [c.id]
+    )
+    return c.daily_dm_cap - rows[0].n
+  }
+  const answer = async (x: IgComment, matchedBy: string) => {
+    const old = Date.now() - new Date(x.timestamp ?? Date.now()).getTime() > SEVEN_DAYS_MS - 60 * 60_000
+    if (!old && c.actions.dm?.length && (await capLeft()) <= 0) {
+      stoppedAtCap = true
+      return
+    }
+    const row = await store(x)
+    const slot = at + 15_000 + Math.floor(Math.random() * 30_000)
+    const queued = await applyCampaign(a, row, c, matchedBy.slice(0, 24), { notBefore: new Date(slot) })
+    /* Only a comment that actually got something takes a slot (a repeat commenter is skipped). */
+    if (queued.length) {
+      at = slot
+      answered++
+    }
+  }
+
+  for (const h of hits) {
+    if (stoppedAtCap) break
+    await answer(h.comment, `catchup:${h.keyword}`)
+  }
+
+  const offer = [{ id: c.id, description: describeOffer({ ...c, on_this_post: true }) }]
+  for (const x of forAi) {
+    if (stoppedAtCap) break
+    let r: CommentReading & { model: string }
+    try {
+      r = await readComment({
+        settings,
+        comment: x.text ?? "",
+        commenter: x.from?.username ?? x.username ?? null,
+        caption: ctx.caption,
+        postNote: ctx.note,
+        isReplyToAnother: false,
+        intents: offer,
+        draft: false,
+      })
+    } catch (error) {
+      await logExec(a.id, "ai_failed", { campaignId: c.id, detail: `catch-up stopped: ${error instanceof Error ? error.message : error}` })
+      break
+    }
+    if (r.intentCampaignId !== c.id) continue
+    const unsafe = NEVER_AUTO.includes(r.category) || r.risk === "high" || r.needsHuman
+    if (unsafe) {
+      const row = await store(x)
+      await metaDb().query(
+        `UPDATE meta.comments SET status = 'needs_human', ai_status = 'done', ai_category = $2, ai_risk = $3, ai_reason = $4, ai_at = NOW(),
+                note = 'Earlier comment: asked for the campaign but also needs a person.'
+          WHERE id = $1 AND campaign_id IS NULL`,
+        [row.id, r.category, r.risk, r.reason]
+      )
+      continue
+    }
+    await answer(x, "catchup:ai")
+  }
+
+  await logExec(a.id, "catchup_done", {
+    campaignId: c.id,
+    detail: `${answered} answered, sending until ${new Date(at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "numeric", minute: "2-digit" })}${stoppedAtCap ? " — stopped at the daily DM limit; run catch-up again tomorrow for the rest" : ""}`,
+  })
+}
+
 /** Live campaigns with a trigger of this kind, applicable to this post, best first. */
-async function liveCampaigns(accountId: string, kind: TriggerKind, mediaId: string | null): Promise<CampaignRow[]> {
+async function liveCampaigns(accountId: string, kind: TriggerKind, mediaId: string | null, anyPost = false): Promise<CampaignRow[]> {
   const { rows } = await metaDb().query(
     `SELECT c.*, t.match_mode, t.keywords, t.intent,
             COALESCE((SELECT json_object_agg(a.kind, a.texts) FROM meta.campaign_actions a WHERE a.campaign_id = c.id), '{}'::json) AS actions
@@ -630,9 +838,9 @@ async function liveCampaigns(accountId: string, kind: TriggerKind, mediaId: stri
        JOIN meta.campaign_triggers t ON t.campaign_id = c.id AND t.kind = $2
       WHERE c.account_id = $1 AND c.status = 'active'
         AND (c.starts_at IS NULL OR c.starts_at <= NOW()) AND (c.ends_at IS NULL OR c.ends_at > NOW())
-        AND (c.media_ids IS NULL OR $3::text = ANY(c.media_ids))
+        AND ($4::boolean OR c.media_ids IS NULL OR $3::text = ANY(c.media_ids))
       ORDER BY c.priority, c.created_at`,
-    [accountId, kind, mediaId]
+    [accountId, kind, mediaId, anyPost]
   )
   return rows
 }
@@ -713,7 +921,7 @@ export async function recordWebhook(body: any): Promise<IntakeResult> {
     }
     if (Array.isArray(entry?.messaging) && entry.messaging.length) {
       try {
-        await intakeMessages(igUserId, entry.messaging)
+        result.queue.push(...(await intakeMessages(igUserId, entry.messaging)))
       } catch (error) {
         if (isMissingSchema(error)) return result
         console.error(`[meta] messages not recorded: ${error instanceof Error ? error.message : error}`)
@@ -806,11 +1014,12 @@ async function intakeComment(igUserId: string, value: any): Promise<IntakeResult
  * Direct messages: stored in conversations. Our own sends come back as echoes with the message id
  * we already stored, and fall away on the unique index.
  */
-async function intakeMessages(igUserId: string, events: any[]) {
+async function intakeMessages(igUserId: string, events: any[]): Promise<string[]> {
+  const queue: string[] = []
   const a = await accountByExternal(igUserId)
   if (!a) {
     await logEvent(igUserId, "messages", "unknown_account")
-    return
+    return queue
   }
   for (const ev of events) {
     const m = ev?.message
@@ -841,9 +1050,51 @@ async function intakeMessages(igUserId: string, events: any[]) {
     )
     if (rowCount && !echo) {
       await metaDb().query(`UPDATE meta.conversations SET unread = unread + 1 WHERE id = $1`, [conversationId])
+      if (typeof m.text === "string" && m.text.trim()) {
+        const q = await campaignFromMessage(a, conversationId, participant, m.text)
+        if (q) queue.push(q)
+      }
     }
     await logEvent(igUserId, "messages", echo ? (rowCount ? "message_echo" : "own_message") : "message_in")
   }
+  return queue
+}
+
+/**
+ * Someone DMs us a campaign keyword ("CALENDAR") — usually because a public reply on an old comment
+ * invited them to. They just wrote, so the 24-hour window is open: the campaign's DM goes back in
+ * the conversation. Once per person per campaign; keyword campaigns on any post count.
+ */
+async function campaignFromMessage(a: AccountRow, conversationId: string, participantId: string, text: string): Promise<string | null> {
+  for (const c of await liveCampaigns(a.id, "keyword", null, true)) {
+    if (!c.actions.dm?.length) continue
+    const keyword = matchKeyword(text, c.keywords, c.match_mode)
+    if (!keyword) continue
+    const ref = { campaignId: c.id }
+    const { rows: sent } = await metaDb().query(
+      `SELECT 1 FROM meta.response_queue WHERE campaign_id = $1 AND kind = 'message' AND target_id = $2 AND status IN ('pending', 'sending', 'sent') LIMIT 1`,
+      [c.id, participantId]
+    )
+    if (sent.length) {
+      await logExec(a.id, "action_skipped", { ...ref, detail: "DM keyword: already sent to this person" })
+      return null
+    }
+    const { rows: today } = await metaDb().query(
+      `SELECT COUNT(*)::int AS n FROM meta.response_queue WHERE campaign_id = $1 AND kind IN ('dm', 'message') AND created_at > NOW() - INTERVAL '24 hours'`,
+      [c.id]
+    )
+    if (today[0].n >= c.daily_dm_cap) {
+      await logExec(a.id, "action_skipped", { ...ref, detail: `Daily DM limit of ${c.daily_dm_cap} reached.` })
+      return null
+    }
+    await logExec(a.id, "campaign_matched", { ...ref, detail: `${c.name} via DM keyword:${keyword}` })
+    return enqueue(a, "message", "campaign", participantId, {
+      conversationId,
+      campaignId: c.id,
+      text: render(pick(c.actions.dm)!, { commenter_username: null }, c),
+    })
+  }
+  return null
 }
 
 async function upsertConversation(accountId: string, participantId: string, username: string | null, direction: "in" | "out", at: Date) {
@@ -899,14 +1150,22 @@ async function enqueue(
   kind: "dm" | "reply" | "hide" | "message",
   source: string,
   targetId: string,
-  opts: { commentRowId?: string; conversationId?: string; campaignId?: string | null; text?: string | null; createdBy?: string | null }
+  opts: {
+    commentRowId?: string
+    conversationId?: string
+    campaignId?: string | null
+    text?: string | null
+    createdBy?: string | null
+    /* Not sent before this time — spaces out a catch-up batch so it reads like a person answering. */
+    notBefore?: Date
+  }
 ): Promise<string | null> {
   const { rows } = await metaDb().query(
-    `INSERT INTO meta.response_queue (account_id, kind, source, target_id, comment_row_id, conversation_id, campaign_id, text, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO meta.response_queue (account_id, kind, source, target_id, comment_row_id, conversation_id, campaign_id, text, created_by, next_attempt_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10::timestamptz, NOW()))
      ON CONFLICT (account_id, target_id, kind) WHERE kind IN ('dm', 'reply', 'hide') DO NOTHING
      RETURNING id`,
-    [a.id, kind, source, targetId, opts.commentRowId ?? null, opts.conversationId ?? null, opts.campaignId ?? null, opts.text ?? null, opts.createdBy ?? null]
+    [a.id, kind, source, targetId, opts.commentRowId ?? null, opts.conversationId ?? null, opts.campaignId ?? null, opts.text ?? null, opts.createdBy ?? null, opts.notBefore ?? null]
   )
   const id = rows[0]?.id ?? null
   if (id) await logExec(a.id, `queued_${kind}`, { campaignId: opts.campaignId, commentRowId: opts.commentRowId, queueId: id, detail: source })
@@ -914,8 +1173,16 @@ async function enqueue(
 }
 
 /** Queues a campaign's actions for one comment, within its limits. */
-async function applyCampaign(a: AccountRow, comment: CommentRow, c: CampaignRow, matchedBy: string): Promise<string[]> {
+async function applyCampaign(
+  a: AccountRow,
+  comment: CommentRow,
+  c: CampaignRow,
+  matchedBy: string,
+  opts: { notBefore?: Date } = {}
+): Promise<string[]> {
   const notes: string[] = []
+  const source = "campaign"
+  let late = false
   let doDm = Boolean(c.actions.dm?.length)
   let replyOnly = !doDm && Boolean(c.actions.reply?.length)
   const ref = { campaignId: c.id, commentRowId: comment.id }
@@ -947,22 +1214,27 @@ async function applyCampaign(a: AccountRow, comment: CommentRow, c: CampaignRow,
   }
   if (doDm && Date.now() - new Date(comment.commented_at).getTime() > SEVEN_DAYS_MS - 60_000) {
     doDm = false
-    notes.push("Older than 7 days — Instagram no longer allows a DM.")
+    late = Boolean(c.actions.late?.length)
+    notes.push(late ? "Older than 7 days — no DM allowed, so invited them to message us instead." : "Older than 7 days — Instagram no longer allows a DM.")
   }
   for (const n of notes) await logExec(a.id, "action_skipped", { ...ref, detail: n })
 
   const ids: string[] = []
+  const at = opts.notBefore
   if (doDm) {
-    const id = await enqueue(a, "dm", "campaign", comment.comment_id, { ...ref, text: render(pick(c.actions.dm)!, comment, c) })
+    const id = await enqueue(a, "dm", source, comment.comment_id, { ...ref, text: render(pick(c.actions.dm)!, comment, c), notBefore: at })
     if (id) ids.push(id)
   }
   /* A repeat commenter whose DM was skipped gets no public reply either: "sent you a DM" would be false. */
   if (c.actions.reply?.length && (doDm || replyOnly)) {
-    const id = await enqueue(a, "reply", "campaign", comment.comment_id, { ...ref, text: render(pick(c.actions.reply)!, comment, c) })
+    const id = await enqueue(a, "reply", source, comment.comment_id, { ...ref, text: render(pick(c.actions.reply)!, comment, c), notBefore: at })
+    if (id) ids.push(id)
+  } else if (late) {
+    const id = await enqueue(a, "reply", source, comment.comment_id, { ...ref, text: render(pick(c.actions.late)!, comment, c), notBefore: at })
     if (id) ids.push(id)
   }
   if (c.actions.hide) {
-    const id = await enqueue(a, "hide", "campaign", comment.comment_id, { ...ref })
+    const id = await enqueue(a, "hide", source, comment.comment_id, { ...ref, notBefore: at })
     if (id) ids.push(id)
   }
 

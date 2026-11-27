@@ -2,6 +2,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import {
   archiveTemplate,
+  catchUpComments,
   connectAccount,
   disconnectAccount,
   dismissComment,
@@ -113,6 +114,16 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
         return
       case "campaign_duplicate":
         res.json({ campaign: await duplicateCampaign(id("campaignId"), opsUserId) })
+        return
+      case "campaign_catchup":
+        res.json({
+          summary: await catchUpComments({
+            campaignId: id("campaignId"),
+            mediaId: String(body.mediaId ?? ""),
+            start: body.start === true,
+            useAi: body.useAi !== false,
+          }),
+        })
         return
       case "template_save":
         res.json({
