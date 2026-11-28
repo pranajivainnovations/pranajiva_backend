@@ -2,6 +2,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/medusa"
 
 import { isValidOpsServiceKey, OPS_SERVICE_KEY_HEADER } from "../../../services/baker-portal/ops-service-auth"
 import { isMissingSchema, SeoError } from "../../../services/seo/db"
+import { queueContentChange, retryNow, scanNow, submitNow } from "../../../services/seo/indexnow"
 import { muteFinding, saveSite, setSiteEnabled, startRun, unmuteFinding } from "../../../services/seo/monitor"
 
 /**
@@ -12,6 +13,10 @@ import { muteFinding, saveSite, setSiteEnabled, startRun, unmuteFinding } from "
  *   site_enabled  { siteId, enabled }            include / leave out of the daily run
  *   mute          { siteId, fingerprint, note }  accept a finding; kept, not scored
  *   unmute        { siteId, fingerprint }
+ *   indexnow_submit { siteId, urls[] }          check and send these pages to IndexNow now
+ *   indexnow_retry  { siteId, urls?[] }         failed/skipped pages (all, or these) back in the queue, sent now
+ *   indexnow_content { site, items[{path,reason}] } the OPS CMS published/unpublished/deleted Knowledge pages
+ *   indexnow_scan   { siteId }                  compare the sitemap now instead of at the half-hour, then send
  */
 
 const UUID = /^[0-9a-f-]{36}$/i
@@ -53,6 +58,18 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
         await unmuteFinding(siteId(), String(body.fingerprint ?? ""))
         res.json({ ok: true })
         return
+      case "indexnow_submit":
+        res.json(await submitNow(siteId(), Array.isArray(body.urls) ? body.urls.map(String) : [], opsUserId))
+        return
+      case "indexnow_retry":
+        res.json(await retryNow(siteId(), Array.isArray(body.urls) && body.urls.length ? body.urls.map(String) : null, opsUserId))
+        return
+      case "indexnow_content":
+        res.json(await queueContentChange(String(body.site ?? ""), Array.isArray(body.items) ? body.items : []))
+        return
+      case "indexnow_scan":
+        res.json(await scanNow(siteId(), opsUserId))
+        return
       default:
         res.status(400).json({ error: "Unknown action." })
     }
@@ -62,7 +79,7 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
       return
     }
     if (isMissingSchema(e)) {
-      res.status(503).json({ error: "The SEO monitor tables are not installed yet (backend migration 1729700000000-SeoMonitor)." })
+      res.status(503).json({ error: String(body.action).startsWith("indexnow") ? "The IndexNow tables are not installed yet (backend migration 1729900000000-IndexNow)." : "The SEO monitor tables are not installed yet (backend migration 1729700000000-SeoMonitor)." })
       return
     }
     console.error(`[ops/seo] ${body.action}: ${e instanceof Error ? e.message : e}`)

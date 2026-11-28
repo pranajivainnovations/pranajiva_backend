@@ -5,6 +5,7 @@ import {
   isValidOpsServiceKey,
   OPS_SERVICE_KEY_HEADER,
 } from "../../../../services/baker-portal/ops-service-auth"
+import { queueProductChange } from "../../../../services/seo/indexnow"
 
 /**
  * Catalogue writes for the PranaJiva products screen in OPS.
@@ -53,28 +54,76 @@ export async function POST(req: MedusaRequest, res: MedusaResponse): Promise<voi
   const manager: EntityManager = req.scope.resolve("manager")
 
   try {
+    /* What the public page looked like before, for IndexNow (see notifySearch below). */
+    const productId = await productIdOf(action, body, manager)
+    const before = productId ? await publicState(manager, productId) : null
+
+    let result: Record<string, any>
     switch (action) {
       case "create":
-        res.status(200).json(await create(req, body, productService, manager))
-        return
+        result = await create(req, body, productService, manager)
+        break
       case "update":
-        res.status(200).json(await update(body, productService, manager))
-        return
+        result = await update(body, productService, manager)
+        break
       case "archive":
       case "restore":
-        res.status(200).json(await setStatus(body, action, productService, manager))
-        return
+        result = await setStatus(body, action, productService, manager)
+        break
       case "setImages":
-        res.status(200).json(await setImages(body, productService, manager))
-        return
+        result = await setImages(body, productService, manager)
+        break
       case "setPrice":
-        res.status(200).json(await setPrice(body, manager))
-        return
+        result = await setPrice(body, manager)
+        break
     }
+    res.status(200).json(result)
+    void notifySearch(manager, productId ?? result.id ?? null, before)
+    return
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error(`[ops/pranajiva/products ${action}]`, message)
     res.status(400).json({ error: message })
+  }
+}
+
+/* ── IndexNow ───────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * This route is the publication hook for PranaJiva products: every write goes through it, so every
+ * write tells IndexNow (services/seo/indexnow.ts) — after the response, never failing the save.
+ * The queue decides what that means from the before/after status and handle: a draft that stays a
+ * draft sends nothing, publishing is "added", an edit to a live product is "updated", archiving or
+ * unpublishing is "removed", and a new handle removes the old address and adds the new one.
+ */
+async function productIdOf(action: Action, body: Record<string, any>, manager: EntityManager): Promise<string | null> {
+  if (action === "create") return null
+  if (action === "setPrice") {
+    const r = await manager
+      .query(`SELECT product_id FROM product_variant WHERE id = $1 AND deleted_at IS NULL`, [String(body.variantId ?? "")])
+      .catch(() => [])
+    return r[0]?.product_id ?? null
+  }
+  return body.productId ? String(body.productId) : null
+}
+
+async function publicState(manager: EntityManager, productId: string): Promise<{ handle: string; status: string } | null> {
+  const r = await manager
+    .query(`SELECT handle, status FROM product WHERE id = $1 AND deleted_at IS NULL`, [productId])
+    .catch(() => [])
+  return r[0] ? { handle: r[0].handle, status: r[0].status } : null
+}
+
+async function notifySearch(
+  manager: EntityManager,
+  productId: string | null,
+  before: { handle: string; status: string } | null
+): Promise<void> {
+  if (!productId) return
+  try {
+    await queueProductChange("pranajiva", before, await publicState(manager, productId))
+  } catch {
+    /* queueProductChange logs its own failures; nothing here may surface to the editor. */
   }
 }
 

@@ -33,6 +33,9 @@ export interface SiteSettings {
   ignorePaths?: string[]
   /** Pages that must always link to at least one product (shop, main collections). Needs productPath. */
   listingPaths?: string[]
+  /** IndexNow key. Set: changed pages are pushed to Bing and other IndexNow engines (indexnow.ts),
+   *  and every run checks that <site>/<key>.txt still serves it. Empty: IndexNow is off. */
+  indexnowKey?: string
 }
 
 export interface SiteInput {
@@ -564,6 +567,19 @@ export async function auditSite(site: SiteInput): Promise<AuditResult> {
       checkId: "llms-missing", category: "ai", severity: "info", fingerprint: "llms-missing",
       title: "No llms.txt", detail: "Optional. A plain-text map of the site for AI tools; nothing guarantees they use it.",
       fix: "Nothing required.", urls: [new URL("/llms.txt", base).toString()],
+    })
+  }
+
+  /* IndexNow key file — without it every submission is refused (403) and nothing says so loudly. */
+  if (s.indexnowKey) {
+    const keyUrl = new URL(`/${s.indexnowKey}.txt`, base).toString()
+    const k = await fetchUrl(keyUrl, { timeoutMs: 15_000 })
+    if (k.status !== 200 || k.body.trim() !== s.indexnowKey) add({
+      checkId: "indexnow-key", category: "indexing", severity: "error", fingerprint: "indexnow-key",
+      title: "The IndexNow key file is missing or wrong",
+      detail: k.status === 200 ? "It loads but does not contain exactly the key." : `It answered ${k.status || k.error}.`,
+      fix: `Serve ${keyUrl} as plain text containing only the key. Until then Bing refuses every IndexNow submission.`,
+      urls: [keyUrl],
     })
   }
 

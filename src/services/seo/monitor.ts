@@ -1,5 +1,6 @@
 import { auditSite, type Finding, type SiteSettings } from "./audit"
 import { SeoError, seoDb } from "./db"
+import { INDEXNOW_KEY } from "./indexnow"
 
 /**
  * SEO Health Monitor — runs, storage and site settings. The checks themselves are in audit.ts.
@@ -193,6 +194,10 @@ export async function saveSite(input: Record<string, unknown>, opsUserId: string
       throw new SeoError("The product page pattern is not a valid pattern.")
     }
   }
+  const indexnowKey = String(input.indexnowKey ?? "").trim()
+  if (indexnowKey && !INDEXNOW_KEY.test(indexnowKey)) {
+    throw new SeoError("The IndexNow key must be 8–128 letters, numbers or dashes.")
+  }
   const settings: SiteSettings = {
     productPath,
     claimCheck: Boolean(input.claimCheck),
@@ -201,6 +206,7 @@ export async function saveSite(input: Record<string, unknown>, opsUserId: string
     privatePaths: list(input.privatePaths),
     ignorePaths: list(input.ignorePaths),
     listingPaths: list(input.listingPaths),
+    ...(indexnowKey ? { indexnowKey } : {}),
   }
   const db = seoDb()
   if (input.id) {
