@@ -31,6 +31,8 @@ export interface SiteSettings {
   privatePaths?: string[]
   /** Paths the crawler never follows (APIs, assets, feeds). */
   ignorePaths?: string[]
+  /** Pages that must always link to at least one product (shop, main collections). Needs productPath. */
+  listingPaths?: string[]
 }
 
 export interface SiteInput {
@@ -41,7 +43,7 @@ export interface SiteInput {
 }
 
 export type Severity = "error" | "warning" | "info"
-export type Category = "indexing" | "sitemap" | "metadata" | "structured-data" | "links" | "images" | "feed" | "content" | "speed"
+export type Category = "indexing" | "sitemap" | "metadata" | "structured-data" | "links" | "images" | "feed" | "content" | "speed" | "ai"
 
 export interface Finding {
   checkId: string
@@ -78,6 +80,24 @@ export interface AuditResult {
 }
 
 const MAX_LIST = 50
+
+/**
+ * AI crawlers checked against robots.txt and the server. `search` ones decide whether pages can be
+ * cited in AI answers; the others collect training data. Tokens and user agents as published by
+ * OpenAI, Anthropic and Perplexity (re-check them now and then — they change).
+ */
+const AI_AGENTS: Array<{ token: string; ua: string; search: boolean }> = [
+  { token: "OAI-SearchBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OAI-SearchBot/1.0; +https://openai.com/searchbot", search: true },
+  { token: "ChatGPT-User", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ChatGPT-User/1.0; +https://openai.com/bot", search: true },
+  { token: "Claude-SearchBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-SearchBot/1.0; +https://www.anthropic.com)", search: true },
+  { token: "Claude-User", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-User/1.0; +https://www.anthropic.com)", search: true },
+  { token: "PerplexityBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)", search: true },
+  { token: "Bingbot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Chrome/120.0.0.0 Safari/537.36", search: true },
+  { token: "GPTBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot", search: false },
+  { token: "ClaudeBot", ua: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)", search: false },
+  { token: "Google-Extended", ua: "", search: false },
+  { token: "CCBot", ua: "CCBot/2.0 (https://commoncrawl.org/faq/)", search: false },
+]
 const ASSET = /\.(png|jpe?g|gif|webp|avif|svg|ico|pdf|xml|txt|json|css|js|mp4|webm|zip|woff2?)$/i
 
 /** Health wording Google's healthcare policy commonly disapproves in Shopping and ads. */
@@ -426,6 +446,124 @@ export async function auditSite(site: SiteInput): Promise<AuditResult> {
       checkId: "home-website", category: "structured-data", severity: "info", fingerprint: "home-website",
       title: "Homepage has no WebSite structured data", detail: "It names the site and can enable a search box in results.",
       fix: "Add WebSite JSON-LD to the homepage.", urls: [base.toString()],
+    })
+  }
+
+  /* ── AI search access ─────────────────────────────────────────────────────────────────────
+   *
+   * Whether AI search and answer engines can read the site at all. Two separate failures:
+   * robots.txt refusing a crawler by name, and the server (or a CDN/firewall in front of it)
+   * answering that crawler differently from a browser — a 403, or a challenge page that is a fraction
+   * of the real page's size. Training crawlers are reported as information only: blocking them is a
+   * legitimate choice, blocking search crawlers costs citations. */
+  if (robotsRes.status === 200) {
+    const samples = [
+      base.toString(),
+      ...Array.from(crawled.values())
+        .filter((c) => c.fetched.status === 200 && productRe?.test(new URL(c.url).pathname))
+        .slice(0, 1)
+        .map((c) => c.url),
+    ]
+    const blockedSearch: string[] = []
+    const blockedTraining: string[] = []
+    for (const a of AI_AGENTS) {
+      const rules = parseRobots(robotsRes.body, a.token)
+      const blocked = samples.filter((u) => robotsBlocks(rules, new URL(u).pathname))
+      if (blocked.length) (a.search ? blockedSearch : blockedTraining).push(`${a.token}: ${blocked.join(", ")}`)
+      /* Private paths must stay closed to named crawlers too. */
+      /* Only paths "*" does block count: those are the ones the site meant to keep out. */
+      const open = (s.privatePaths ?? []).filter((p) => !p.startsWith("!") && robotsBlocks(robots, p) && !robotsBlocks(rules, p))
+      if (open.length) {
+        add({
+          checkId: "ai-private-open", category: "ai", severity: "warning", fingerprint: `ai-private-open:${a.token}`,
+          title: `robots.txt lets ${a.token} into private paths`,
+          detail: `A group naming ${a.token} replaces the "*" group for it, and this one does not repeat the private paths.`,
+          fix: `Repeat the Disallow lines for ${open.join(", ")} in the ${a.token} group.`, urls: open,
+        })
+      }
+    }
+    if (blockedSearch.length) add({
+      checkId: "ai-search-blocked", category: "ai", severity: "error", fingerprint: "ai-search-blocked",
+      title: "robots.txt blocks AI search crawlers", detail: "Pages they cannot read cannot be cited in ChatGPT, Claude or Perplexity answers.",
+      fix: "Allow these crawlers in robots.txt (training crawlers can be blocked separately).", urls: blockedSearch,
+    })
+    if (blockedTraining.length) add({
+      checkId: "ai-training-blocked", category: "ai", severity: "info", fingerprint: "ai-training-blocked",
+      title: "robots.txt blocks AI training crawlers", detail: "A legitimate choice; it does not affect AI search citations.",
+      fix: "Nothing to fix if this is intended.", urls: blockedTraining,
+    })
+
+    const normal = new Map(samples.map((u) => [u, crawled.get(u)?.fetched.body.length ?? 0]))
+    const denied: string[] = []
+    const different: string[] = []
+    for (const a of AI_AGENTS.filter((x) => x.search)) {
+      for (const u of samples) {
+        const r = await fetchUrl(u, { userAgent: a.ua, timeoutMs: 15_000 })
+        if (r.status !== 200) denied.push(`${a.token} → ${u} (${r.status || r.error || "no answer"})`)
+        else if ((normal.get(u) ?? 0) > 5000 && r.body.length < (normal.get(u) ?? 0) * 0.3)
+          different.push(`${a.token} → ${u} (${r.body.length} vs ${normal.get(u)} bytes)`)
+      }
+    }
+    if (denied.length) add({
+      checkId: "ai-denied", category: "ai", severity: "error", fingerprint: "ai-denied",
+      title: "AI crawlers are refused by the server", detail: "robots.txt allows them, but the server, CDN or firewall answers with an error.",
+      fix: "Check bot-protection or firewall rules for these user agents.", urls: denied,
+    })
+    if (different.length) add({
+      checkId: "ai-different", category: "ai", severity: "warning", fingerprint: "ai-different",
+      title: "AI crawlers get a much smaller page than browsers", detail: "Usually a bot challenge or an error page served with status 200.",
+      fix: "Check bot-protection settings; crawlers should get the same HTML as everyone else.", urls: different,
+    })
+  }
+
+  /* Listing pages that should always show products — an empty one cached as 200 tells every crawler
+     the shop sells nothing. Configured per site (Settings → listing pages). */
+  if (productRe) {
+    const empty: string[] = []
+    for (const lp of s.listingPaths ?? []) {
+      const u = new URL(lp, base).toString()
+      const c = Array.from(crawled.values()).find((x) => sameUrl(x.url, u))
+      const f = c?.fetched ?? (await fetchUrl(u))
+      const parsed = c?.parsed ?? (f.status === 200 ? parsePage(f.body) : null)
+      if (f.status !== 200) continue // reported as page-error / broken-link elsewhere
+      const productLinks = (parsed?.links ?? []).filter((h) => {
+        const t = internal(h, u)
+        return t ? productRe.test(new URL(t).pathname) : false
+      })
+      if (!productLinks.length) empty.push(u)
+    }
+    if (empty.length) add({
+      checkId: "listing-empty", category: "ai", severity: "error", fingerprint: "listing-empty",
+      title: "Listing pages showing no products", detail: "The page loads but links to no product — crawlers read it as an empty shop.",
+      fix: "Check the catalogue connection; the page should keep its last good version when the catalogue is down.", urls: empty,
+    })
+  }
+
+  /* llms.txt — optional. If present, every link in it should work. */
+  const llms = await fetchUrl(new URL("/llms.txt", base).toString())
+  if (llms.status === 200) {
+    const links = Array.from(llms.body.matchAll(/\]\((https?:\/\/[^)\s]+)\)/g)).map((m) => m[1])
+    const broken: string[] = []
+    await pool(links.slice(0, 300), 4, async (l) => {
+      const c = Array.from(crawled.values()).find((x) => sameUrl(x.url, l))
+      const st = c ? c.fetched.status : (await fetchUrl(l, { method: "HEAD" })).status
+      if (st !== 200) broken.push(`${l} (${st})`)
+    })
+    if (!/text\/plain|text\/markdown/i.test(llms.headers["content-type"] ?? "")) add({
+      checkId: "llms-type", category: "ai", severity: "info", fingerprint: "llms-type",
+      title: "llms.txt is not served as plain text", detail: `Content-Type is "${llms.headers["content-type"] ?? "none"}".`,
+      fix: "Serve it as text/plain.", urls: [llms.url],
+    })
+    if (broken.length) add({
+      checkId: "llms-broken-link", category: "ai", severity: "warning", fingerprint: "llms-broken-link",
+      title: "llms.txt links that do not work", detail: "AI tools reading the file are sent to dead pages.",
+      fix: "Generate llms.txt from the published pages so it cannot drift.", urls: broken,
+    })
+  } else {
+    add({
+      checkId: "llms-missing", category: "ai", severity: "info", fingerprint: "llms-missing",
+      title: "No llms.txt", detail: "Optional. A plain-text map of the site for AI tools; nothing guarantees they use it.",
+      fix: "Nothing required.", urls: [new URL("/llms.txt", base).toString()],
     })
   }
 

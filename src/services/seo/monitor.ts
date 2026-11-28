@@ -200,6 +200,7 @@ export async function saveSite(input: Record<string, unknown>, opsUserId: string
     thinWords: Math.max(0, Math.min(Number(input.thinWords) || 250, 2000)),
     privatePaths: list(input.privatePaths),
     ignorePaths: list(input.ignorePaths),
+    listingPaths: list(input.listingPaths),
   }
   const db = seoDb()
   if (input.id) {

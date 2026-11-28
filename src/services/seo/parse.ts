@@ -135,10 +135,28 @@ export interface Robots {
   allow: RegExp[]
 }
 
-export function parseRobots(text: string): Robots {
+/**
+ * The robots rules that apply to one crawler (default: the "*" group).
+ *
+ * A crawler obeys the one group that names it and ignores "*" when such a group exists — so a site
+ * that names GPTBot in its own group without repeating the private paths has opened them to GPTBot.
+ * Matching is on the product token, case-insensitive.
+ */
+export function parseRobots(text: string, agent = "*"): Robots {
   const sitemaps: string[] = []
   const disallow: RegExp[] = []
   const allow: RegExp[] = []
+  const want = agent.toLowerCase()
+  const named = want !== "*" && text
+    .split(/\r?\n/)
+    .some((l) => {
+      const m = l.replace(/#.*/, "").trim().match(/^user-agent\s*:\s*(.+)$/i)
+      const token = m?.[1].trim().toLowerCase()
+      return Boolean(token && token !== "*" && want.includes(token))
+    })
+  /* Does a group's agent list apply to us? */
+  const applies = (agents: string[]) =>
+    named ? agents.some((a) => a !== "*" && want.includes(a)) : agents.includes("*")
   let agents: string[] = []
   let inRules = false
   const toRe = (p: string) =>
@@ -156,7 +174,7 @@ export function parseRobots(text: string): Robots {
       agents.push(val.toLowerCase())
     } else if (key === "disallow" || key === "allow") {
       inRules = true
-      if (!agents.includes("*") || !val) continue
+      if (!applies(agents) || !val) continue
       ;(key === "disallow" ? disallow : allow).push(toRe(val))
     }
   }

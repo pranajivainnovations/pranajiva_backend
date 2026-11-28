@@ -20,14 +20,14 @@ export interface Fetched {
 
 export async function fetchUrl(
   url: string,
-  opts: { method?: "GET" | "HEAD"; timeoutMs?: number; maxBytes?: number } = {}
+  opts: { method?: "GET" | "HEAD"; timeoutMs?: number; maxBytes?: number; userAgent?: string } = {}
 ): Promise<Fetched> {
   const started = Date.now()
   try {
     const res = await fetch(url, {
       method: opts.method ?? "GET",
       redirect: "manual",
-      headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+      headers: { "User-Agent": opts.userAgent ?? USER_AGENT, Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
       signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
     })
     const headers: Record<string, string> = {}
